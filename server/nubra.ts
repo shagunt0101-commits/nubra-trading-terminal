@@ -12,7 +12,7 @@ export const BASE_URL = NUBRA_ENV === "PROD" ? "https://api.nubra.io" : "https:/
 
 const SESSION_FILE = path.join(process.env.NUBRA_SESSION_DIR || process.cwd(), ".nubra_session");
 
-let sessionToken = loadSession();
+let sessionToken = process.env.VERCEL ? "" : loadSession();
 let loginError = "";
 let loginStatus = sessionToken ? "LOGGED_IN" : "NOT_LOGGED_IN";
 
@@ -27,12 +27,14 @@ function loadSession(): string {
 }
 
 function saveSession(token: string) {
+  if (process.env.VERCEL) return; // no persistent disk on Vercel
   try {
     fs.writeFileSync(SESSION_FILE, token, "utf8");
   } catch (_) {}
 }
 
 function clearSession() {
+  if (process.env.VERCEL) return;
   try {
     if (fs.existsSync(SESSION_FILE)) fs.unlinkSync(SESSION_FILE);
   } catch (_) {}
@@ -271,11 +273,14 @@ export function getLoginState() {
   };
 }
 
-// Generic Fetch Wrapper that injects Authorization headers
+// Generic Fetch Wrapper that injects Authorization headers — auto-login via TOTP if no session
 async function nubraRequest(endpoint: string, options: RequestInit = {}): Promise<any> {
-  if (!sessionToken) {
-    // No session yet — let the request fail cleanly; caller handles fallback
-    throw new Error("Not logged in. Use OTP or TOTP login first.");
+  if (!sessionToken || loginStatus === "FAILED") {
+    // Auto-login with TOTP if credentials are configured
+    const token = await nubraLogin();
+    if (!token) {
+      throw new Error("Not logged in. Use OTP or TOTP login first.");
+    }
   }
 
   const url = endpoint.startsWith("http") ? endpoint : `${BASE_URL}/${endpoint}`;
