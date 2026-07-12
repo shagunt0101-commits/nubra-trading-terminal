@@ -1,0 +1,8 @@
+{
+  "name": "Remix: Nubra Trading Terminal",
+  "description": "An AI-powered stock, futures, and options screening and signaling terminal integrated with the Nubra broker API, featuring backtesting, technical analysis, strategies, and real-time data.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
