@@ -1,20 +1,17 @@
-import { GoogleGenAI } from "@google/genai";
-
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
-let aiClient: GoogleGenAI | null = null;
+let aiClient: any = null;
 
-function getAiClient(): GoogleGenAI {
+async function getAiClient(): Promise<any> {
   if (!aiClient) {
     if (!GEMINI_API_KEY) {
       console.warn("GEMINI_API_KEY is not defined in environment variables. AI features may fail.");
     }
+    const { GoogleGenAI } = await import("@google/genai");
     aiClient = new GoogleGenAI({
       apiKey: GEMINI_API_KEY || "",
       httpOptions: {
-        headers: {
-          "User-Agent": "aistudio-build",
-        },
+        headers: { "User-Agent": "aistudio-build" },
       },
     });
   }
