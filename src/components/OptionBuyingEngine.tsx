@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from "react";
+import React, { useState, useMemo, useEffect, useRef } from "react";
 import { Zap, TrendingUp, TrendingDown, ShieldAlert, CheckCircle2, Clock, Activity, ArrowRight, Play, RefreshCw, BarChart3 } from "lucide-react";
 import { Instrument, ChartDataPoint } from "../types";
 
