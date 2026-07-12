@@ -1,7 +1,6 @@
 import "dotenv/config";
 import express from "express";
 import path from "path";
-import { createServer as createViteServer } from "vite";
 import { nubraApi, nubraLogin, nubraSendOtp, nubraVerifyOtp, getLoginState, getSessionToken } from "./server/nubra.js";
 import { generateTradingSignals } from "./server/gemini.js";
 import { calculateSMA, calculateEMA, calculateRSI, calculateBollingerBands, calculateMACD } from "./server/indicators.js";
@@ -800,20 +799,18 @@ app.get("/api/global/sentiment", async (req, res) => {
 // Mount Vite middleware / Serve static build assets
 async function startServer() {
   if (process.env.NODE_ENV !== "production" && !process.env.VERCEL) {
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
     });
     app.use(vite.middlewares);
   } else if (!process.env.VERCEL) {
-    const distPath = path.join(process.cwd(), "dist");
+    const distPath = path.resolve("dist");
     app.use(express.static(distPath));
     app.get("*", (req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
+      res.sendFile(path.resolve("dist", "index.html"));
     });
-  }
-
-  if (!process.env.VERCEL) {
     app.listen(PORT, "0.0.0.0", () => {
       console.log(`[Terminal] Server started and listening on http://0.0.0.0:${PORT}`);
     });
