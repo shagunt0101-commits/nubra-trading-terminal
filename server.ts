@@ -821,6 +821,10 @@ async function startServer() {
 }
 
 // Always run startup (sets up static serving even on Vercel)
-await startServer();
+// Use .then() instead of top-level await for Vercel serverless compatibility
+let _started = false;
+const ready = startServer().then(() => { _started = true; }).catch((e) => {
+  console.error("[Startup] Failed:", e);
+});
 
 export default app;
