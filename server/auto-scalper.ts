@@ -1,5 +1,6 @@
 import { nubraApi, getSessionToken, nubraLogin, fetchOptionSymbol, fetchOptionCandles, fetchCandlesInternal } from "./nubra.js";
 import { calculateRSI, calculateSMA, calculateEMA, calculateMACD, calculateBollingerBands } from "./indicators.js";
+import { evaluateTrendContinuation, evaluateBBMeanReversal, evaluateRSIReversal, evaluateTrendFollow } from "./strategy-engine.js";
 import { writeFileSync, readFileSync, existsSync } from "fs";
 import { join } from "path";
 import logger from "./logger.js";
@@ -156,6 +157,36 @@ const DEFAULT_CONFIG: ScalperConfig = {
   maxPositionSizePct: 20,
 };
 
+// Per-instrument overrides — each instrument's risk profile (volatility, premium
+// scale) demands different thresholds. Merged over DEFAULT_CONFIG on construct.
+const INSTRUMENT_DEFAULTS: Record<string, Partial<ScalperConfig>> = {
+  NIFTY: {
+    lotSize: 65, lotCount: 2, totalQty: 130,
+    minPremiumThreshold: 0.5, maxEntryPremium: 600,
+    strikeOffset: 1, premiumTargetPoints: 4,
+  },
+  BANKNIFTY: {
+    lotSize: 35, lotCount: 2, totalQty: 70,
+    minPremiumThreshold: 1.0, maxEntryPremium: 900,
+    strikeOffset: 1, premiumTargetPoints: 6,
+  },
+  FINNIFTY: {
+    lotSize: 65, lotCount: 2, totalQty: 130,
+    minPremiumThreshold: 0.5, maxEntryPremium: 500,
+    strikeOffset: 1, premiumTargetPoints: 3,
+  },
+  MIDCPNIFTY: {
+    lotSize: 140, lotCount: 1, totalQty: 140,
+    minPremiumThreshold: 0.5, maxEntryPremium: 500,
+    strikeOffset: 1, premiumTargetPoints: 3,
+  },
+  SENSEX: {
+    lotSize: 20, lotCount: 2, totalQty: 40,
+    minPremiumThreshold: 1.0, maxEntryPremium: 1000,
+    strikeOffset: 1, premiumTargetPoints: 6,
+  },
+};
+
 export class AutoScalper {
   private config: ScalperConfig;
   private mode: ScalperMode = "IDLE";
@@ -176,7 +207,7 @@ export class AutoScalper {
   private dailyPnlDate = "";
 
   constructor(cfg?: Partial<ScalperConfig>) {
-    this.config = { ...DEFAULT_CONFIG, ...cfg };
+    this.config = { ...DEFAULT_CONFIG, ...INSTRUMENT_DEFAULTS[cfg?.symbol || "NIFTY"], ...cfg };
     const state = loadState();
     this.trades = state.trades || [];
     this.logs = state.logs || [];
@@ -777,6 +808,21 @@ export class AutoScalper {
     };
   }
 
+  private evaluateEngineStrategy(candles: any[]) {
+    switch (this.config.strategy) {
+      case "trend_continuation":
+        return evaluateTrendContinuation(candles as any, "scalping");
+      case "bb_mean_reversion":
+        return evaluateBBMeanReversal(candles as any);
+      case "rsi_reversal":
+        return evaluateRSIReversal(candles as any);
+      case "sma_ema_trend":
+        return evaluateTrendFollow(candles as any);
+      default:
+        return null;
+    }
+  }
+
   private async computeSignal(spot: number): Promise<ScalperSignal | null> {
     try {
       const candles = await this.fetchCandles1m();
@@ -790,6 +836,14 @@ export class AutoScalper {
       const uniqueCloses = new Set(closes);
       if (uniqueCloses.size <= 1) {
         this.log("SIGNAL", "Synthetic/flat candle data detected, skipping signal");
+        return null;
+      }
+
+      const results = this.evaluateEngineStrategy(candles);
+      if (results && results.direction !== "NONE") {
+        const isBull = results.direction === "LONG";
+        const sig = await this.resolveStrikePremium(spot, isBull, results.confidence, [results.reason || "engine"], 50, "flat", false, 0, 0, 1, 15);
+        if (sig.direction !== "NEUTRAL") return sig;
         return null;
       }
 
