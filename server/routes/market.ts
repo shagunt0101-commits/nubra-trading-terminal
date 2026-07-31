@@ -72,7 +72,7 @@ router.get("/quote/:refId", async (req, res) => {
       if (!candles || candles.length === 0) throw new Error("No index price from broker");
       const last = candles[candles.length - 1];
       rawPrice = last.close * 100;
-      rawPrevClose = inst.prev_close || inst.underlying_prev_close || rawPrice;
+      rawPrevClose = inst.prev_close || inst.underlying_prev_close || null;
       // Day OHLC from 1d candles (last = today, prev = yesterday's close)
       const dayCandles = await fetchCandles(inst.asset, inst.exchange, "1d", 2);
       const today = dayCandles[dayCandles.length - 1];
@@ -85,7 +85,7 @@ router.get("/quote/:refId", async (req, res) => {
       const quote = await nubraApi.getCurrentPrice(inst.asset, inst.exchange);
       rawPrice = quote?.price || quote?.data?.price || quote?.spot;
       if (!rawPrice) throw new Error("No price from broker");
-      rawPrevClose = quote.prev_close || rawPrice;
+      rawPrevClose = quote.prev_close || null;
     }
 
     const price = rawPrice / 100;

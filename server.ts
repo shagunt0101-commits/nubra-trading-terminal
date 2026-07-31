@@ -7,7 +7,7 @@ import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import { WebSocketServer } from "ws";
 import { generateTradingSignals } from "./server/gemini.js";
-import { calculateSMA, calculateEMA, calculateRSI, calculateBollingerBands, calculateMACD } from "./server/indicators.js";
+import { calculateSMA, calculateEMA, calculateRSI, calculateBollingerBands, calculateMACD, calculateADX } from "./server/indicators.js";
 import { getGlobalSentiment } from "./server/global.js";
 import { nubraApi, nubraLogin, nubraSendOtp, nubraVerifyOtp, getLoginState, getSessionToken } from "./server/nubra.js";
 import { fetchCandles } from "./server/market-data.js";
@@ -1022,31 +1022,6 @@ const YAHOO_MAP: Record<string, string> = {
 // Spot price lookup for any symbol — tries broker, then Yahoo Finance
 const SPOT_INDEXES = new Set(["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]);
 
-// EMA + ADX for a candle series (used for the tracker's analytics view)
-function emaSeries(values: number[], period: number): number[] {
-  const k = 2 / (period + 1);
-  const out: number[] = [];
-  let prev = values[0];
-  values.forEach((v, i) => { prev = i === 0 ? v : v * k + prev * (1 - k); out.push(prev); });
-  return out;
-}
-function adxOf(candles: any[], period = 14): number {
-  if (candles.length < period + 2) return 0;
-  const tr = (i: number) => Math.max(candles[i].high - candles[i].low, Math.abs(candles[i].high - candles[i - 1].close), Math.abs(candles[i].low - candles[i - 1].close));
-  const pdm = (i: number) => { const d = candles[i].high - candles[i - 1].high; return d > 0 && d > candles[i - 1].low - candles[i].low ? d : 0; };
-  const ndm = (i: number) => { const d = candles[i - 1].low - candles[i].low; return d > 0 && d > candles[i].high - candles[i - 1].high ? d : 0; };
-  let atr = 0, p = 0, n = 0;
-  for (let i = 1; i <= period; i++) { atr += tr(i); p += pdm(i); n += ndm(i); }
-  atr /= period; p /= period; n /= period;
-  for (let i = period + 1; i < candles.length; i++) {
-    atr = (atr * (period - 1) + tr(i)) / period;
-    p = (p * (period - 1) + pdm(i)) / period;
-    n = (n * (period - 1) + ndm(i)) / period;
-  }
-  if (atr === 0) return 0;
-  return 100 * Math.abs(p - n) / (p + n + atr);
-}
-
 app.get("/api/market/spot/:symbol", async (req, res) => {
   const symbol = req.params.symbol.toUpperCase();
   const exchange = (req.query.exchange as string) || (symbol === "SENSEX" ? "BSE" : "NSE");
@@ -1077,9 +1052,16 @@ app.get("/api/market/spot/:symbol", async (req, res) => {
         fetchCandles(symbol, exchange, "3m", 40).catch(() => []),
         fetchCandles(symbol, exchange, "5m", 40).catch(() => []),
       ]);
-      if (c3.length > 0) ema9 = emaSeries(c3.map((c: any) => c.close), 9)[c3.length - 1];
-      if (c5.length > 0) adx5m = adxOf(c5);
-      if (c3.length > 0) adx3m = adxOf(c3);
+      if (c3.length > 0) {
+        const closes3 = c3.map((c: any) => c.close);
+        ema9 = calculateEMA(closes3, 9)[closes3.length - 1];
+        const adxRes3 = calculateADX(c3, 14);
+        adx3m = adxRes3.adx[adxRes3.adx.length - 1] || 0;
+      }
+      if (c5.length > 0) {
+        const adxRes5 = calculateADX(c5, 14);
+        adx5m = adxRes5.adx[adxRes5.adx.length - 1] || 0;
+      }
     } else {
       const quote = await nubraApi.getCurrentPrice(symbol, exchange);
       const rawPrice = quote?.price || quote?.data?.price || quote?.spot;

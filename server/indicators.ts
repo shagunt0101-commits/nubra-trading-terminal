@@ -108,16 +108,61 @@ export function calculateMACD(closes: number[], fastPeriod = 12, slowPeriod = 26
   const fastEMA = calculateEMA(closes, fastPeriod);
   const slowEMA = calculateEMA(closes, slowPeriod);
   const macdLine: number[] = [];
-  
+
   for (let i = 0; i < closes.length; i++) {
     macdLine.push(fastEMA[i] - slowEMA[i]);
   }
-  
+
   const signalLine = calculateEMA(macdLine, signalPeriod);
   const histogram: number[] = [];
   for (let i = 0; i < closes.length; i++) {
     histogram.push(macdLine[i] - signalLine[i]);
   }
-  
+
   return { macdLine, signalLine, histogram };
+}
+
+export interface AdxResult {
+  adx: number[];
+  plusDi: number[];
+  minusDi: number[];
+  atr: number[];
+}
+
+// Standard 5-step Wilder's ADX: EMA-smoothed TR/+DM/-DM → +DI/-DI → DX → EMA-smoothed ADX
+export function calculateADX(candles: Candle[], period = 14): AdxResult {
+  const n = candles.length;
+  const closes = candles.map((x) => x.close);
+  const highs = candles.map((x) => x.high);
+  const lows = candles.map((x) => x.low);
+
+  const tr = candles.map((x, i) =>
+    i === 0 ? x.high - x.low : Math.max(x.high - x.low, Math.abs(x.high - closes[i - 1]), Math.abs(x.low - closes[i - 1]))
+  );
+  const pDm = candles.map((x, i) => {
+    if (i === 0) return 0;
+    const u = x.high - highs[i - 1];
+    const d = lows[i - 1] - x.low;
+    return u > d && u > 0 ? u : 0;
+  });
+  const mDm = candles.map((x, i) => {
+    if (i === 0) return 0;
+    const u = x.high - highs[i - 1];
+    const d = lows[i - 1] - x.low;
+    return d > u && d > 0 ? d : 0;
+  });
+
+  const str = calculateEMA(tr, period);        // smoothed TR (ATR)
+  const sp = calculateEMA(pDm, period);        // smoothed +DM
+  const sm = calculateEMA(mDm, period);        // smoothed -DM
+
+  const pDi = str.map((t, i) => (t > 0 ? (100 * sp[i]) / t : 0));
+  const mDi = str.map((t, i) => (t > 0 ? (100 * sm[i]) / t : 0));
+
+  const dx = pDi.map((pdi, i) => {
+    const sum = pdi + mDi[i];
+    return sum > 0 ? (Math.abs(pdi - mDi[i]) / sum) * 100 : 0;
+  });
+
+  return { adx: calculateEMA(dx, period), plusDi: pDi, minusDi: mDi, atr: str };
 }
