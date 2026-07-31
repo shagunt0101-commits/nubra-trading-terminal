@@ -8,7 +8,7 @@ export interface Instrument {
   asset: string;
   expiry: number;
   exchange: string;
-  derivative_type: "OPT" | "FUT" | "STOCK";
+  derivative_type: "OPT" | "FUT" | "STOCK" | "INDEX";
   tick_size: number;
   underlying_prev_close: number;
 }
@@ -103,6 +103,30 @@ export interface PortfolioSummary {
   simulated: boolean;
 }
 
+export interface OptionLeg {
+  sp: number;
+  ltp: number;
+  oi: number;
+  volume: number;
+  iv: number;
+  delta: number;
+  theta: number;
+  change?: number;
+  ltpchg?: number;
+  oi_change_pct?: number;
+}
+
+export interface OptionChain {
+  atm: number;
+  ce: OptionLeg[];
+  pe: OptionLeg[];
+}
+
+export interface OptionChainData {
+  asset: string;
+  chain: OptionChain;
+}
+
 export interface ChartDataPoint {
   ts: number;
   open: number;
@@ -119,6 +143,60 @@ export interface ChartDataPoint {
   macdLine: number;
   signalLine: number;
   macdHist: number;
+}
+
+export interface QuoteData {
+  price: number;
+  prev_close: number;
+  change: number;
+}
+
+export interface PremiumData {
+  ltp: number;
+  strike: number;
+  optType: string;
+}
+
+export interface ScalperTrade {
+  intentOrderId: number;
+  timestamps?: {
+    intentCreatedAt: string;
+  };
+  pnl: number;
+  optType: string;
+  strike?: number;
+  entryPremium: number;
+  exitReason?: string;
+  status?: string;
+  orderQty: number;
+  qty?: number;
+  exitPremium?: number;
+}
+
+export interface OptionGreeks {
+  sp: number;
+  ltp: number;
+  oi: number;
+  volume: number;
+  iv: number;
+  delta: number;
+  theta: number;
+  change?: number;
+  oi_change_pct?: number;
+  ltpchg?: number;
+}
+
+export interface OptionChain {
+  ce: OptionGreeks[];
+  pe: OptionGreeks[];
+  atm: number;
+}
+
+export interface OptionChainData {
+  asset: string;
+  expiry: number;
+  chain: OptionChain;
+  timestamp?: number;
 }
 
 export interface BacktestResult {
@@ -146,4 +224,13 @@ export interface BacktestResult {
     pnlPercent: number;
     result: "WIN" | "LOSS";
   }>;
+}
+
+export interface LoginState {
+  status: "LOGGED_IN" | "PENDING" | "FAILED" | "NOT_LOGGED_IN";
+  error: string;
+  phone: string;
+  deviceId: string;
+  env: "UAT" | "PROD" | "";
+  baseUrl: string;
 }

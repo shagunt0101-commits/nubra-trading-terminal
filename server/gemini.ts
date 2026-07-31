@@ -1,3 +1,4 @@
+import logger from "./logger.js";
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
 let aiClient: any = null;
@@ -5,7 +6,7 @@ let aiClient: any = null;
 async function getAiClient(): Promise<any> {
   if (!aiClient) {
     if (!GEMINI_API_KEY) {
-      console.warn("GEMINI_API_KEY is not defined in environment variables. AI features may fail.");
+      logger.warn("GEMINI_API_KEY not set, AI features may fail");
     }
     const { GoogleGenAI } = await import("@google/genai");
     aiClient = new GoogleGenAI({
@@ -167,13 +168,13 @@ Analyze this data and return the professional screening & signaling report with 
       }
       return text;
     } catch (err: any) {
-      console.error("Custom AI provider analysis failed:", err.message);
+      logger.error({ err }, "Custom AI provider analysis failed");
       return `### Custom AI Provider Error\nFailed to fetch analysis from Custom AI Endpoint: ${err.message}\n\n*Please verify your API key, Custom Base URL, and model name in the AI settings panel.*`;
     }
   }
 
   // Default Google Gemini Flow
-  const ai = getAiClient();
+  const ai = await getAiClient();
   const modelsToTry = ["gemini-flash-latest", "gemini-3.5-flash", "gemini-3.1-pro-preview"];
 
   let lastErr: any = null;
@@ -192,7 +193,7 @@ Analyze this data and return the professional screening & signaling report with 
         return response.text;
       }
     } catch (err: any) {
-      console.warn(`Model ${model} failed:`, err.message);
+      logger.warn({ err }, `Model ${model} failed`);
       lastErr = err;
     }
   }
@@ -203,8 +204,8 @@ Analyze this data and return the professional screening & signaling report with 
 function generateFallbackAnalysis(marketContext: any): string {
   const symbol = marketContext.symbol || "NIFTY";
   const strategy = marketContext.strategy || "day_trading";
-  const price = marketContext.priceData?.price || 24211;
-  const prevClose = marketContext.priceData?.prev_close || price;
+  const price = marketContext.priceData?.ltp || marketContext.priceData?.price || 24211;
+  const prevClose = marketContext.priceData?.prevClose || marketContext.priceData?.prev_close || price;
   const changePct = ((price - prevClose) / prevClose) * 100;
   const trend = changePct >= 0 ? "BULLISH (Positive Momentum)" : "BEARISH (Negative Pressure)";
 
@@ -237,7 +238,7 @@ function generateFallbackAnalysis(marketContext: any): string {
 
 #### 5. Options Strategy Execution (F&O)
 - **Recommended Setup**: Bull Call Spread / Iron Condor
-- **Strikes**: Buy ATM CE (${Math.round(price / 50) * 50}), Sell OTM CE (${Math.round(price / 50) * 50 + 200}) for optimal risk-defined theta decay.
+- **Strikes**: Buy ATM CE (${marketContext.atmAnalysis?.atmStrike || Math.round(price / 50) * 50}), Sell OTM CE (${(marketContext.atmAnalysis?.atmStrike || Math.round(price / 50) * 50) + 200}) for optimal risk-defined theta decay.
 
 #### 6. Risk Management Filters
 - **Margin Impact**: Within standard intraday margin limits.

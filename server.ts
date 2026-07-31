@@ -1,16 +1,119 @@
 import "dotenv/config";
 import express from "express";
 import path from "path";
-import { nubraApi, nubraLogin, nubraSendOtp, nubraVerifyOtp, getLoginState, getSessionToken } from "./server/nubra.js";
+import http from "http";
+import cors from "cors";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
+import { WebSocketServer } from "ws";
 import { generateTradingSignals } from "./server/gemini.js";
 import { calculateSMA, calculateEMA, calculateRSI, calculateBollingerBands, calculateMACD } from "./server/indicators.js";
 import { getGlobalSentiment } from "./server/global.js";
+import { nubraApi, nubraLogin, nubraSendOtp, nubraVerifyOtp, getLoginState, getSessionToken } from "./server/nubra.js";
+import { fetchCandles } from "./server/market-data.js";
+import { scalper } from "./server/scalper-instance.js";
+import logger from "./server/logger.js";
+import { validateEnv } from "./server/env.js";
+
+validateEnv();
 
 const app = express();
+const server = http.createServer(app);
 const PORT = 3000;
+
+// ── WebSocket for live market data ──────────────────────────────────
+const wss = new WebSocketServer({ server, path: "/ws" });
+const WS_BROADCAST_INTERVAL = 2000; // 2s push
+
+// Static index ref map — survives instrumentCache overwrite from API
+const WS_INDEX_MAP: Record<string, { ref_id: number }> = {
+  NIFTY:     { ref_id: 1001 },
+  BANKNIFTY: { ref_id: 1002 },
+  SENSEX:    { ref_id: 1003 },
+  MIDCPNIFTY:{ ref_id: 1004 },
+  FINNIFTY:  { ref_id: 1005 },
+};
+
+wss.on("connection", (ws) => {});
+
+// Broadcast loop — broker data only, no simulated jitter fallback
+async function wsBroadcastQuotes() {
+  const WATCH = Object.keys(WS_INDEX_MAP);
+  const results = await Promise.allSettled(WATCH.map(async (asset) => {
+    const meta = WS_INDEX_MAP[asset];
+    const exchange = asset === "SENSEX" ? "BSE" : "NSE";
+    // optionchains/.../price does not serve index spots; use latest candles
+    const [candles, dayCandles] = await Promise.all([
+      fetchCandles(asset, exchange, "1m", 1),
+      fetchCandles(asset, exchange, "1d", 2),
+    ]);
+    const last = candles?.[candles.length - 1];
+    if (!last?.close) return null;
+    const price = last.close;
+    const prev = dayCandles?.[dayCandles.length - 2]?.close ?? price;
+    return { ref_id: meta.ref_id, price, prev_close: prev, change: prev > 0 ? ((price - prev) / prev) * 100 : 0 };
+  }));
+  const batch: Record<number, { price: number; prev_close: number; change: number }> = {};
+  for (const r of results) {
+    if (r.status === "fulfilled" && r.value) batch[r.value.ref_id] = r.value;
+  }
+  if (Object.keys(batch).length === 0) return;
+
+  // Include option premium for active scalper trade
+  let premium: { ltp: number; strike: number; optType: string } | undefined;
+  try {
+    const trade = scalper.getActiveTrade();
+    if (trade && trade.status === "OPEN") {
+      const sym = scalper.getConfig().symbol;
+      const exch = scalper.getConfig().exchange;
+      const expiry = scalper.getConfig().optionExpiry || undefined;
+      const chain = await nubraApi.getOptionChain(sym, expiry, exch);
+      const chainData = chain?.chain || chain;
+      const optList = trade.optType === "CE" ? (chainData?.ce || []) : (chainData?.pe || []);
+      const arr = Array.isArray(optList) ? optList : Object.values(optList);
+      const match = arr.find((o: any) => Math.round((o.sp || 0) / 100) === trade.strike);
+      if (match?.ltp) {
+        premium = { ltp: match.ltp / 100, strike: trade.strike, optType: trade.optType };
+      }
+    }
+  } catch (e) { logger.warn({ err: e }, "[WS Premium] Failed to fetch option premium"); }
+  const msg = JSON.stringify({ type: "quotes", data: batch, premium });
+  wss.clients.forEach((client) => {
+    if (client.readyState === 1) client.send(msg);
+  });
+}
+if (!process.env.VERCEL) setInterval(wsBroadcastQuotes, WS_BROADCAST_INTERVAL);
 
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
+
+// Security middleware
+app.use(cors({ origin: process.env.CORS_ORIGIN || "http://localhost:3000", credentials: true }));
+app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
+
+// Rate limiting — 100 req/min per IP
+const apiLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, error: "Too many requests, try again later." },
+});
+app.use("/api", apiLimiter);
+
+// Auth middleware — requires valid broker session for trading endpoints
+function requireAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const token = getSessionToken();
+  if (!token) {
+    return res.status(401).json({ success: false, error: "No active broker session. Login first." });
+  }
+  next();
+}
+
+// Protect trading routes
+app.use("/api/portfolio", requireAuth);
+app.use("/api/orders", requireAuth);
+app.use("/api/scalper", requireAuth);
 
 // List of liquid stocks, major indices (NIFTY, BANKNIFTY, SENSEX, MIDCPNIFTY, FINNIFTY) and options for quick screening fallback
 const LIQUID_INSTRUMENTS = [
@@ -171,13 +274,14 @@ app.get("/api/market/quote/:refId", async (req, res) => {
 
   try {
     const quote = await nubraApi.getCurrentPrice(inst.asset, inst.exchange);
-    const data = {
-      instrument: inst,
-      price: quote.price / 100, // paise to rupees
-      prev_close: (quote.prev_close || quote.price) / 100,
-      change: quote.change || 0,
-      simulated: false,
-    };
+    // Nubra returns {price: 7763763, prev_close: 7676592, change: 1.135} — paise
+    const rawPrice = quote?.price || quote?.data?.price || quote?.spot;
+    if (!rawPrice) throw new Error("No price from broker");
+    const rawPrevClose = quote.prev_close || rawPrice;
+    const price = rawPrice / 100;
+    const prev = rawPrevClose / 100;
+    const change = prev > 0 ? ((price - prev) / prev) * 100 : 0;
+    const data = { instrument: inst, price, prev_close: prev, change, simulated: false };
     quoteCache.set(cacheKey, { data, timestamp: now });
     res.json(data);
   } catch (err: any) {
@@ -390,57 +494,6 @@ app.get("/api/portfolio/summary", async (req, res) => {
 // Native intervals supported by Nubra
 const BROKER_INTERVALS = new Set(["1s","1m","2m","3m","5m","15m","30m","1h","1d","1w","1mt"]);
 
-// Shared candle fetcher — uses broker's native interval, only aggregates for 1m-based TFs
-async function fetchCandles(symbol: string, exchange: string, interval: string, count: number): Promise<any[]> {
-  const brokerInterval = BROKER_INTERVALS.has(interval) ? interval : "1m";
-  const stepMins: Record<string, number> = { "1s": 1/60, "1m": 1, "2m": 2, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "1d": 1440, "1w": 10080, "1mt": 43200 };
-  const step = stepMins[interval] || 5;
-  const today = new Date();
-  // Request enough data for the requested count + margin
-  const daysBack = Math.max(1, Math.ceil((step * count * 60 * 1000) / (24 * 60 * 60 * 1000) * 2));
-  const startDate = new Date(today.getTime() - daysBack * 24 * 60 * 60 * 1000).toISOString();
-  const endDate = today.toISOString();
-
-  const query = { query: [{ exchange, type: "STOCK", values: [symbol], fields: ["open", "high", "low", "close", "cumulative_volume"], startDate, endDate, interval: brokerInterval, intraDay: false, realTime: false }] };
-  let candles: any[] = [];
-  try {
-    const data = await nubraApi.getHistoricalData(query);
-    if (data?.result?.[0]) {
-      const symData = data.result[0].values[0][symbol];
-      if (symData?.close) {
-        const times = symData.close.map((p: any) => p.ts);
-        candles = times.map((ts: number, idx: number) => ({ ts, open: symData.open[idx].v / 100, high: symData.high[idx].v / 100, low: symData.low[idx].v / 100, close: symData.close[idx].v / 100, volume: symData.cumulative_volume[idx].v }));
-      }
-    }
-  } catch (_) {}
-  if (!candles.length) {
-    // Generate mock candles aligned to market open
-    try {
-      const quote = await nubraApi.getCurrentPrice(symbol, exchange);
-      const brokerPrice = (quote.price || 2421100) / 100;
-      const total = Math.max(count * Math.max(step, 1), 375);
-      const marketOpen = getMarketOpenToday();
-      const ms = interval === "1s" ? 1000 : 60000;
-      for (let i = 0; i < total; i++) candles.push({ ts: (marketOpen + i * ms) * 1000000, open: brokerPrice, high: brokerPrice, low: brokerPrice, close: brokerPrice, volume: 100000 });
-    } catch (_) {
-      candles = generateMockCandles(symbol, Math.max(count * 5, 375), "1m");
-    }
-  }
-  // Add variance if flat
-  const uniqueCloses = new Set(candles.map((c: any) => c.close));
-  if (uniqueCloses.size <= 1 && candles.length > 5) {
-    const basePrice = candles[0].close;
-    candles = candles.map((c: any, idx: number) => {
-      const isLast = idx === candles.length - 1;
-      const variance = isLast ? 0 : basePrice * (Math.sin(idx / 7) * 0.003 + Math.cos(idx / 3) * 0.002);
-      const close = isLast ? basePrice : Math.round((basePrice + variance) * 100) / 100;
-      return { ...c, open: Math.round((basePrice + Math.sin(idx / 5) * 0.002 * basePrice) * 100) / 100, high: Math.max(close, Math.round((basePrice + Math.abs(variance) * 2) * 100) / 100), low: Math.min(close, Math.round((basePrice - Math.abs(variance)) * 100) / 100), close, volume: Math.floor(100000 + Math.sin(idx) * 50000 + 50000) };
-    });
-  }
-  if (candles.length > count) candles = candles.slice(candles.length - count);
-  return candles;
-}
-
 // Technical timeseries charts & screening calculations
 app.post("/api/market/historical", async (req, res) => {
   const { symbol, interval, length = 150, exchange = "NSE" } = req.body;
@@ -476,7 +529,13 @@ app.post("/api/market/historical", async (req, res) => {
 
 // Strategy Backtesting Engine
 app.post("/api/backtest", async (req, res) => {
-  const { symbol, strategy, interval = "5m", length = 200, riskReward = 2, stopLossPercent = 1.5, targetPercent = 3, exchange = "NSE" } = req.body;
+  const {
+    symbol, strategy, interval = "5m", length = 200, riskReward = 2,
+    stopLossPercent = 1.5, targetPercent = 3, exchange = "NSE",
+    confidenceThreshold = 55, premiumTargetPct = 30, stopLossPct = 15,
+    // Option RSI MR specific params
+    optionRsiThreshold = 40, optionRsiPeriod = 14, maxEntryPremium = 200, premiumTargetPoints = 4
+  } = req.body;
   try {
     let candles = await fetchCandles(symbol, exchange, interval, length);
     if (candles.length === 0) {
@@ -492,8 +551,30 @@ app.post("/api/backtest", async (req, res) => {
 
     let trades = [];
     let currentPosition: any = null;
-    let balance = 100000; // Simulated start balance: 1 Lakh rupees
+    let balance = 100000;
     const initialBalance = balance;
+
+    // For option_rsi_mr: fetch real CE/PE OHLC for ATM strike
+    let ceOptCandles: any[] = [];
+    let peOptCandles: any[] = [];
+    if (strategy === "option_rsi_mr") {
+      try {
+        const medianSpot = closes.slice(20).reduce((a: number, b: number) => a + b, 0) / Math.max(1, closes.length - 20);
+        const strike = Math.round(medianSpot / 50) * 50;
+        const chain = await nubraApi.getOptionChain(symbol, undefined, exchange);
+        const ceEntries = chain?.chain?.ce ? Object.values(chain.chain.ce) as any[] : [];
+        const peEntries = chain?.chain?.pe ? Object.values(chain.chain.pe) as any[] : [];
+        const ceSym = ceEntries.find((o: any) => Math.round(o.sp / 100) === strike)?.symbol;
+        const peSym = peEntries.find((o: any) => Math.round(o.sp / 100) === strike)?.symbol;
+        if (ceSym) ceOptCandles = await fetchCandles(ceSym, exchange, interval, length);
+        if (peSym) peOptCandles = await fetchCandles(peSym, exchange, interval, length);
+        console.log(`[Backtest] Fetched ${ceOptCandles.length} CE and ${peOptCandles.length} PE candles`);
+      } catch (_) {}
+      // Align option candles to spot candle timestamps
+      if (!ceOptCandles.length && !peOptCandles.length) {
+        console.log("[Backtest] Fallback: no option OHLC, using spot candle stream — orig entry point");
+      }
+    }
 
     for (let i = 20; i < candles.length; i++) {
       const candle = candles[i];
@@ -502,14 +583,73 @@ app.post("/api/backtest", async (req, res) => {
       // Check exits
       if (currentPosition) {
         const price = candle.close;
+
+        // Option RSI MR — premium-based exit
+        if (currentPosition.entryPremium != null) {
+          // Recompute current premium from option candles or synthetic model
+          const ci = i < ceOptCandles.length && i < peOptCandles.length ? i : null;
+          const useRealCe = ci != null && ceOptCandles[ci]?.close > 0;
+          const useRealPe = ci != null && peOptCandles[ci]?.close > 0;
+          const atm = Math.round(price / 50) * 50;
+          const curPrem = currentPosition.optType === "CE"
+            ? (useRealCe ? ceOptCandles[ci!].close : price * 0.006 + Math.max(0, (price - atm) * 0.4))
+            : (useRealPe ? peOptCandles[ci!].close : price * 0.005 + Math.max(0, (atm - price) * 0.4));
+          const entryP = currentPosition.entryPremium;
+          const pnlPts = curPrem - entryP;
+
+          // Phase 1 — initial SL or target
+          if (!currentPosition.phase1TargetHit) {
+            const slHit = curPrem <= currentPosition.stopLoss;
+            const tpHit = curPrem >= currentPosition.target;
+            if (tpHit) {
+              // Phase 1→2: hit target, lock breakeven
+              currentPosition.phase1TargetHit = true;
+              currentPosition.stopLoss = entryP;
+              currentPosition.maxPriceSeen = curPrem;
+            } else if (slHit || i === candles.length - 1) {
+              const exitPrem = slHit ? currentPosition.stopLoss : curPrem;
+              const pnlVal = (exitPrem - entryP) * 100;
+              balance += pnlVal;
+              trades.push({
+                ...currentPosition, exitTime: Math.round(candle.ts / 1000000),
+                exitPrice: price, exitPremium: Math.round(exitPrem * 100) / 100,
+                pnl: Math.round(pnlVal * 100) / 100,
+                pnlPercent: Math.round((exitPrem / entryP - 1) * 10000) / 100,
+                result: pnlVal > 0 ? "WIN" : "LOSS",
+              });
+              currentPosition = null;
+            }
+          } else {
+            // Phase 2 & 3 — trailing
+            if (curPrem > (currentPosition.maxPriceSeen || entryP)) currentPosition.maxPriceSeen = curPrem;
+            const trailStop = (currentPosition.maxPriceSeen || entryP) * 0.80;
+            const exitPrem = curPrem <= trailStop ? curPrem : null;
+            if ((exitPrem != null) || i === candles.length - 1) {
+              const ePrem = exitPrem != null ? exitPrem : curPrem;
+              const pnlVal = (ePrem - entryP) * 100;
+              balance += pnlVal;
+              trades.push({
+                ...currentPosition, exitTime: Math.round(candle.ts / 1000000),
+                exitPrice: price, exitPremium: Math.round(ePrem * 100) / 100,
+                pnl: Math.round(pnlVal * 100) / 100,
+                pnlPercent: Math.round((ePrem / entryP - 1) * 10000) / 100,
+                result: pnlVal > 0 ? "WIN" : "LOSS",
+              });
+              currentPosition = null;
+            }
+          }
+          continue;
+        }
+
+        // Standard spot-price-based exit logic
         const profitPct = (price - currentPosition.entryPrice) / currentPosition.entryPrice * (currentPosition.side === "BUY" ? 1 : -1);
 
-        const stoplossHit = profitPct <= -stopLossPercent / 100;
-        const targetHit = profitPct >= targetPercent / 100;
+        const slHit = profitPct <= -stopLossPercent / 100;
+        const tpHit = profitPct >= targetPercent / 100;
 
-        if (stoplossHit || targetHit || i === candles.length - 1) {
-          const exitPrice = stoplossHit ? currentPosition.entryPrice * (1 + (currentPosition.side === "BUY" ? -stopLossPercent : stopLossPercent) / 100) :
-                            targetHit ? currentPosition.entryPrice * (1 + (currentPosition.side === "BUY" ? targetPercent : -targetPercent) / 100) : price;
+        if (slHit || tpHit || i === candles.length - 1) {
+          const exitPrice = slHit ? currentPosition.entryPrice * (1 + (currentPosition.side === "BUY" ? -stopLossPercent : stopLossPercent) / 100) :
+                            tpHit ? currentPosition.entryPrice * (1 + (currentPosition.side === "BUY" ? targetPercent : -targetPercent) / 100) : price;
           const pnlVal = (exitPrice - currentPosition.entryPrice) * currentPosition.qty * (currentPosition.side === "BUY" ? 1 : -1);
 
           balance += pnlVal;
@@ -532,32 +672,142 @@ app.post("/api/backtest", async (req, res) => {
 
       if (strategy === "sma_ema_cross") {
         if (closes[i] > sma20[i] && closes[i - 1] <= sma20[i - 1] && ema50[i] > ema50[i - 1]) {
-          triggerSignal = true;
-          side = "BUY";
+          triggerSignal = true; side = "BUY";
         } else if (closes[i] < sma20[i] && closes[i - 1] >= sma20[i - 1] && ema50[i] < ema50[i - 1]) {
-          triggerSignal = true;
-          side = "SELL";
+          triggerSignal = true; side = "SELL";
         }
       } else if (strategy === "rsi_overbought_oversold") {
-        if (rsi[i] > 30 && rsi[i - 1] <= 30) {
-          triggerSignal = true;
-          side = "BUY";
-        } else if (rsi[i] < 70 && rsi[i - 1] >= 70) {
-          triggerSignal = true;
-          side = "SELL";
-        }
+        if (rsi[i] > 30 && rsi[i - 1] <= 30) { triggerSignal = true; side = "BUY"; }
+        else if (rsi[i] < 70 && rsi[i - 1] >= 70) { triggerSignal = true; side = "SELL"; }
       } else if (strategy === "bollinger_band_reversal") {
-        if (closes[i] > bb.lower[i] && closes[i - 1] <= bb.lower[i - 1]) {
+        if (closes[i] > bb.lower[i] && closes[i - 1] <= bb.lower[i - 1]) { triggerSignal = true; side = "BUY"; }
+        else if (closes[i] < bb.upper[i] && closes[i - 1] >= bb.upper[i - 1]) { triggerSignal = true; side = "SELL"; }
+      } else if (strategy === "s2_scalper") {
+        // S2: RSI extremes + MACD momentum + VWAP + BB Width + Volume Z-score
+        const s2Macd = calculateMACD(closes, 12, 26, 9);
+        // Warm-up: dynamic — on higher TFs (15m+) use 26 (MACD stable), lower TFs use 40 for momentum stability
+        if (i < (interval === "15m" || interval === "1h" || interval === "4h" || interval === "1d" ? 26 : 40)) continue;
+        const rsiVal = rsi[i];
+        const macdLine = s2Macd.macdLine[i];
+        const signalLine = s2Macd.signalLine[i];
+        const macdHist = s2Macd.histogram[i];
+        const prevMacdHist = s2Macd.histogram[i - 1];
+
+        let bullScore = 0, bearScore = 0;
+        if (rsiVal < 30) { bullScore += 2; }
+        else if (rsiVal > 70) { bearScore += 2; }
+        else if (rsiVal > 50) { bullScore += 1; }
+        else { bearScore += 1; }
+
+        const expanding = macdLine > signalLine && macdHist > prevMacdHist;
+        const contracting = macdLine < signalLine && macdHist < prevMacdHist;
+        if (expanding) { bullScore += 2; }
+        else if (contracting) { bearScore += 2; }
+        else if (macdLine > signalLine) { bullScore += 1; }
+        else { bearScore += 1; }
+
+        // BB Width
+        const bbMid = bb.middle[i];
+        const bbWidth = bbMid > 0 ? ((bb.upper[i] - bb.lower[i]) / bbMid) * 100 : 0;
+
+        // VWAP over last 20
+        const batch = candles.slice(Math.max(0, i - 19), i + 1);
+        const sumVol = batch.reduce((a: number, c: any) => a + (c.volume || 0), 0);
+        const vwap = sumVol > 0 ? batch.reduce((a: number, c: any) => a + c.close * (c.volume || 0), 0) / sumVol : candle.close;
+        if (candle.close > vwap) { bullScore += 1; } else { bearScore += 1; }
+
+        // Volume Z-score
+        const vols = batch.map((c: any) => c.volume || 0);
+        const volAvg = vols.reduce((a: number, b: number) => a + b, 0) / vols.length;
+        const volStd = Math.sqrt(vols.reduce((a: number, b: number) => a + (b - volAvg) ** 2, 0) / vols.length);
+        const volZ = volStd > 0 ? (vols[vols.length - 1] - volAvg) / volStd : 0;
+        if (volZ > 2) {
+          if (bullScore >= bearScore) bullScore += 1;
+          else bearScore += 1;
+        }
+
+        const totalScore = bullScore + bearScore;
+        const confidence = totalScore > 0 ? Math.round(Math.max(bullScore, bearScore) / totalScore * 100) : 50;
+        const isBull = bullScore > bearScore;
+        const hasStrong = rsiVal < 30 || rsiVal > 70 || expanding || contracting;
+
+        if (hasStrong && confidence >= confidenceThreshold && totalScore >= 3) {
           triggerSignal = true;
-          side = "BUY";
-        } else if (closes[i] < bb.upper[i] && closes[i - 1] >= bb.upper[i - 1]) {
-          triggerSignal = true;
-          side = "SELL";
+          side = isBull ? "BUY" : "SELL";
+        }
+      } else if (strategy === "option_rsi_mr") {
+        // Option RSI MR: uses real option OHLC if available, synthetic fallback
+        const tfSec: Record<string, number> = { "1m": 60, "3m": 180, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400 };
+        const stepSec = tfSec[interval] || 60;
+        if (stepSec > 300) continue; // only 1m/3m/5m meaningful
+        const rsiPeriod = optionRsiPeriod || 14;
+        const rsiThreshold = optionRsiThreshold || 32;
+        const premiumTargetPts = premiumTargetPoints || 4;
+        if (i < rsiPeriod + 2) continue;
+
+        // Use real option OHLC if available, aligned by candle index
+        const ceUsed = ceOptCandles.length > i;
+        const peUsed = peOptCandles.length > i;
+        const getCePremium = (idx: number) => ceUsed ? ceOptCandles[idx].close : null;
+        const getPePremium = (idx: number) => peUsed ? peOptCandles[idx].close : null;
+
+        // Build premium series from real option data or synthetic fallback
+        const atm = Math.round(closes[i] / 50) * 50;
+        const batchCloses = closes.slice(0, i + 1);
+        let ceSeries: number[], peSeries: number[];
+        if (ceUsed) {
+          ceSeries = ceOptCandles.slice(0, i + 1).map(c => c.close);
+        } else {
+          ceSeries = batchCloses.map(c => c * 0.006 + Math.max(0, (c - atm) * 0.4));
+        }
+        if (peUsed) {
+          peSeries = peOptCandles.slice(0, i + 1).map(c => c.close);
+        } else {
+          peSeries = batchCloses.map(c => c * 0.005 + Math.max(0, (atm - c) * 0.4));
+        }
+
+        // 15-min spot RSI for trend filter
+        const spotRsiVals = calculateRSI(batchCloses, 14);
+        const spotRsi15 = spotRsiVals[spotRsiVals.length - 1] || 50;
+
+        const ceRsiArr = calculateRSI(ceSeries, rsiPeriod);
+        const peRsiArr = calculateRSI(peSeries, rsiPeriod);
+        if (!ceRsiArr.length || !peRsiArr.length) continue;
+
+        const ceRsi = ceRsiArr[ceRsiArr.length - 1];
+        const peRsi = peRsiArr[peRsiArr.length - 1];
+
+        if (ceRsi <= rsiThreshold && spotRsi15 > 50) {
+          const entryPremium = ceSeries[ceSeries.length - 1];
+          if (entryPremium <= maxEntryPremium) {
+            triggerSignal = true; side = "BUY";
+            currentPosition = {
+              id: trades.length + 1, symbol, side: "BUY",
+              entryTime: Math.round(candle.ts / 1000000),
+              entryPrice: candle.close, entryPremium,
+              optType: "CE", strike: atm, stopLoss: entryPremium * (1 - 0.5),
+              target: entryPremium + premiumTargetPts, qty: 1,
+              status: "OPEN", maxPriceSeen: entryPremium, phase1TargetHit: false,
+            };
+          }
+        } else if (peRsi <= rsiThreshold && spotRsi15 < 50) {
+          const entryPremium = peSeries[peSeries.length - 1];
+          if (entryPremium <= maxEntryPremium) {
+            triggerSignal = true; side = "SELL";
+            currentPosition = {
+              id: trades.length + 1, symbol, side: "SELL",
+              entryTime: Math.round(candle.ts / 1000000),
+              entryPrice: candle.close, entryPremium,
+              optType: "PE", strike: atm, stopLoss: entryPremium * (1 - 0.5),
+              target: entryPremium + premiumTargetPts, qty: 1,
+              status: "OPEN", maxPriceSeen: entryPremium, phase1TargetHit: false,
+            };
+          }
         }
       }
 
       if (triggerSignal) {
-        const qty = Math.max(1, Math.floor(balance / candle.close)); // Allocate full capital units
+        const qty = Math.max(1, Math.floor(balance / candle.close));
         if (qty > 0) {
           currentPosition = {
             id: trades.length + 1,
@@ -569,7 +819,7 @@ app.post("/api/backtest", async (req, res) => {
           };
         }
       }
-    }
+    } // for loop
 
     const totalTrades = trades.length;
     const winningTrades = trades.filter((t) => t.result === "WIN").length;
@@ -770,20 +1020,128 @@ const YAHOO_MAP: Record<string, string> = {
 };
 
 // Spot price lookup for any symbol — tries broker, then Yahoo Finance
+const SPOT_INDEXES = new Set(["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]);
+
+// EMA + ADX for a candle series (used for the tracker's analytics view)
+function emaSeries(values: number[], period: number): number[] {
+  const k = 2 / (period + 1);
+  const out: number[] = [];
+  let prev = values[0];
+  values.forEach((v, i) => { prev = i === 0 ? v : v * k + prev * (1 - k); out.push(prev); });
+  return out;
+}
+function adxOf(candles: any[], period = 14): number {
+  if (candles.length < period + 2) return 0;
+  const tr = (i: number) => Math.max(candles[i].high - candles[i].low, Math.abs(candles[i].high - candles[i - 1].close), Math.abs(candles[i].low - candles[i - 1].close));
+  const pdm = (i: number) => { const d = candles[i].high - candles[i - 1].high; return d > 0 && d > candles[i - 1].low - candles[i].low ? d : 0; };
+  const ndm = (i: number) => { const d = candles[i - 1].low - candles[i].low; return d > 0 && d > candles[i].high - candles[i - 1].high ? d : 0; };
+  let atr = 0, p = 0, n = 0;
+  for (let i = 1; i <= period; i++) { atr += tr(i); p += pdm(i); n += ndm(i); }
+  atr /= period; p /= period; n /= period;
+  for (let i = period + 1; i < candles.length; i++) {
+    atr = (atr * (period - 1) + tr(i)) / period;
+    p = (p * (period - 1) + pdm(i)) / period;
+    n = (n * (period - 1) + ndm(i)) / period;
+  }
+  if (atr === 0) return 0;
+  return 100 * Math.abs(p - n) / (p + n + atr);
+}
+
 app.get("/api/market/spot/:symbol", async (req, res) => {
   const symbol = req.params.symbol.toUpperCase();
   const exchange = (req.query.exchange as string) || (symbol === "SENSEX" ? "BSE" : "NSE");
   try {
-    const quote = await nubraApi.getCurrentPrice(symbol, exchange);
-    if (quote && quote.price) {
-      return res.json({ symbol, price: quote.price / 100, exchange, source: "broker" });
+    let price: number;
+    let prevClose: number;
+    let ohlc: { open: number; high: number; low: number } | undefined;
+    let ema9 = 0;
+    let adx3m = 0;
+    let adx5m = 0;
+
+    if (SPOT_INDEXES.has(symbol)) {
+      // optionchains/.../price does not serve index spots — use latest candles
+      const candles = await fetchCandles(symbol, exchange, "1m", 1);
+      if (!candles || candles.length === 0) throw new Error("No index price from broker");
+      const last = candles[candles.length - 1];
+      price = last.close;
+      const dayCandles = await fetchCandles(symbol, exchange, "1d", 2);
+      const today = dayCandles[dayCandles.length - 1];
+      if (today) {
+        ohlc = { open: today.open, high: today.high, low: today.low };
+        prevClose = dayCandles.length > 1 ? dayCandles[dayCandles.length - 2].close : today.open;
+      } else {
+        prevClose = today ? today.open : price;
+      }
+      // analytics: 9-EMA + ADX on 3m/5m (parallel, non-fatal)
+      const [c3, c5] = await Promise.all([
+        fetchCandles(symbol, exchange, "3m", 40).catch(() => []),
+        fetchCandles(symbol, exchange, "5m", 40).catch(() => []),
+      ]);
+      if (c3.length > 0) ema9 = emaSeries(c3.map((c: any) => c.close), 9)[c3.length - 1];
+      if (c5.length > 0) adx5m = adxOf(c5);
+      if (c3.length > 0) adx3m = adxOf(c3);
+    } else {
+      const quote = await nubraApi.getCurrentPrice(symbol, exchange);
+      const rawPrice = quote?.price || quote?.data?.price || quote?.spot;
+      if (!rawPrice) throw new Error("No price from broker");
+      price = rawPrice / 100;
+      prevClose = (quote.prev_close || rawPrice) / 100;
     }
-  } catch (_) {}
-  const inst = instrumentCache.find((i: any) => i.asset === symbol);
-  if (inst && inst.underlying_prev_close) {
-    return res.json({ symbol, price: inst.underlying_prev_close / 100, exchange: inst.exchange, source: "cache" });
-  }
-  res.status(404).json({ error: "Symbol not found." });
+
+    const pointChange = price - prevClose;
+    const changePct = prevClose > 0 ? (pointChange / prevClose) * 100 : 0;
+    return res.json({
+      symbol, price, prevClose, pointChange, changePct, exchange, source: "broker",
+      open: ohlc?.open ?? price, high: ohlc?.high ?? price, low: ohlc?.low ?? price,
+      ema9: ema9 || price, adx3m, adx5m,
+    });
+  } catch (err: any) { logger.warn({ err: err.message, symbol }, "[Spot Price] Broker API failed"); }
+  res.status(404).json({ error: "Symbol not found — broker returned no data." });
+});
+
+// ── Auto-Scalper Instance ──────────────────────────────────
+app.post("/api/scalper/start", (req, res) => {
+  const { symbol, lotCount, confidenceThreshold, premiumTargetPct, stopLossPct, strikeOffset, pollIntervalMs } = req.body || {};
+  if (symbol) scalper.updateConfig({ symbol });
+  if (lotCount) scalper.updateConfig({ lotCount, totalQty: (scalper.getConfig().lotSize || 75) * lotCount });
+  if (confidenceThreshold) scalper.updateConfig({ confidenceThreshold });
+  if (premiumTargetPct) scalper.updateConfig({ premiumTargetPct });
+  if (stopLossPct) scalper.updateConfig({ stopLossPct });
+  if (strikeOffset) scalper.updateConfig({ strikeOffset });
+  if (pollIntervalMs) scalper.updateConfig({ pollIntervalMs });
+  scalper.start();
+  res.json({ success: true, mode: scalper.getMode(), config: scalper.getConfig() });
+});
+
+app.post("/api/scalper/stop", (req, res) => {
+  scalper.stop();
+  res.json({ success: true, mode: scalper.getMode() });
+});
+
+app.post("/api/scalper/reset", (req, res) => {
+  scalper.reset();
+  res.json({ success: true, mode: scalper.getMode() });
+});
+
+app.post("/api/scalper/clear-old-trades", (req, res) => {
+  scalper.clearOldTrades();
+  res.json({ success: true, trades: scalper.getTrades().length });
+});
+
+app.get("/api/scalper/status", (req, res) => {
+  res.json({
+    mode: scalper.getMode(),
+    config: scalper.getConfig(),
+    stats: scalper.getStats(),
+    activeTrade: scalper.getActiveTrade(),
+    trades: scalper.getTrades().slice(-20),
+    logs: scalper.getLogs(30),
+  });
+});
+
+app.post("/api/scalper/config", (req, res) => {
+  scalper.updateConfig(req.body);
+  res.json({ success: true, config: scalper.getConfig() });
 });
 
 // Global Market Sentiment — real data from Yahoo Finance
@@ -805,14 +1163,17 @@ async function startServer() {
       appType: "spa",
     });
     app.use(vite.middlewares);
+    server.listen(PORT, "0.0.0.0", () => {
+      logger.info(`[Terminal] Dev server started on http://0.0.0.0:${PORT}`);
+    });
   } else if (!process.env.VERCEL) {
     const distPath = path.resolve("dist");
     app.use(express.static(distPath));
     app.get("*", (req, res) => {
       res.sendFile(path.resolve("dist", "index.html"));
     });
-    app.listen(PORT, "0.0.0.0", () => {
-      console.log(`[Terminal] Server started and listening on http://0.0.0.0:${PORT}`);
+    server.listen(PORT, "0.0.0.0", () => {
+      logger.info(`[Terminal] Server started on http://0.0.0.0:${PORT}`);
     });
   }
 }
@@ -821,7 +1182,30 @@ async function startServer() {
 // Use .then() instead of top-level await for Vercel serverless compatibility
 let _started = false;
 const ready = startServer().then(() => { _started = true; }).catch((e) => {
-  console.error("[Startup] Failed:", e);
+  logger.error({ err: e }, "[Startup] Failed");
 });
+
+// Warm broker session at boot so the first authenticated request doesn't 401
+if (!getSessionToken() && !process.env.VERCEL) {
+  nubraLogin().then((token) => {
+    logger.info(token ? "[Boot] Broker session warmed" : "[Boot] Broker login failed — OTP login required");
+  });
+}
+
+// ── Graceful shutdown ──────────────────────────────────────────────
+function shutdown(signal: string) {
+  logger.info({ signal }, `[Shutdown] ${signal} received, closing gracefully`);
+  wss.close(() => logger.info("[Shutdown] WebSocket server closed"));
+  server.close(() => {
+    scalper.persist();
+    logger.info("[Shutdown] HTTP server closed, state persisted");
+    process.exit(0);
+  });
+  // If forced shutdown after 5s
+  setTimeout(() => { logger.warn("[Shutdown] Forced exit after timeout"); process.exit(1); }, 5000).unref();
+}
+
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
 
 export default app;

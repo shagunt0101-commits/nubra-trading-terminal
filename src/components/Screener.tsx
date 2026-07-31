@@ -79,31 +79,29 @@ export default function Screener({
       .catch(() => {});
   };
 
-  // On-demand price cache for F&O assets still showing as 0
+  // On-demand price cache for F&O assets still showing as 0 (fires once per missing asset, not every WS tick)
   const [fallbackPrices, setFallbackPrices] = React.useState<Record<string, number>>({});
+  const fetchedRef = React.useRef<Set<string>>(new Set());
   React.useEffect(() => {
     if (tradingMode !== "FNO") return;
-    const needFetch = fnoUnderlyings.filter(item => {
+    for (const item of fnoUnderlyings) {
+      if (fetchedRef.current.has(item.asset)) continue;
       const opt = instruments.find(i => i.asset === item.asset && i.derivative_type === "OPT");
-      return !opt || !quotes[opt.ref_id];
-    });
-    for (const item of needFetch) {
-      if (fallbackPrices[item.asset]) continue;
-      const opt = instruments.find(i => i.asset === item.asset && i.derivative_type === "OPT");
+      if (opt && quotes[opt.ref_id]) continue; // already have live data
+      fetchedRef.current.add(item.asset);
       if (opt) {
         fetch(`/api/market/quote/${opt.ref_id}`)
           .then(r => r.ok ? r.json() : null)
           .then(d => { if (d?.price) setFallbackPrices(p => ({ ...p, [item.asset]: d.price })); })
           .catch(() => {});
       } else {
-        // No broker instrument at all (e.g. SENSEX) — use spot endpoint
         fetch(`/api/market/spot/${item.asset}?exchange=${item.exchange || 'NSE'}`)
           .then(r => r.ok ? r.json() : null)
           .then(d => { if (d?.price) setFallbackPrices(p => ({ ...p, [item.asset]: d.price })); })
           .catch(() => {});
       }
     }
-  }, [tradingMode, fnoUnderlyings, instruments, quotes]);
+  }, [tradingMode]); // only re-run on mode change, not every quotes tick
 
   if (tradingMode === "FNO") {
     const filteredFno = fnoUnderlyings.filter(item => {
@@ -122,49 +120,47 @@ export default function Screener({
       : [];
 
     return (
-      <div className="bg-brand-card border border-brand-border rounded-lg flex flex-col h-[650px] overflow-hidden shadow-2xl">
-        <div className="p-4 border-b border-brand-border bg-black/20 space-y-3">
+      <div className="glass-surface border border-brand-border rounded-xl flex flex-col h-[650px] overflow-hidden shadow-2xl glass-enter">
+        <div className="p-3 border-b border-brand-border glass-base/50 space-y-3">
           <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <Layers className="h-4 w-4 text-emerald-400" />
-              <h2 className="font-serif italic text-sm text-gray-400">F&O Screener</h2>
+            <div className="flex items-center gap-2.5">
+              <Layers className="h-4.5 w-4.5 text-emerald-400" />
+              <h2 className="font-serif italic text-base text-gray-200 tracking-tight">F&O Screener</h2>
             </div>
-            <div className="flex gap-0.5 bg-black/60 rounded-lg p-0.5 border border-brand-border">
+            <div className="flex gap-1 glass-base rounded-lg p-0.5 border border-brand-border">
               {(["ALL","INDEX","FUT","OPT"] as const).map(f => (
                 <button key={f} onClick={() => setFnoFilter(f)}
-                  className={`px-2 py-0.5 rounded text-[9px] font-bold font-mono cursor-pointer transition-all ${fnoFilter === f ? "bg-emerald-600 text-white shadow" : "text-gray-400 hover:text-white"}`}
+                  className={`px-3 py-1.5 rounded text-xs font-bold font-mono cursor-pointer transition-all ${fnoFilter === f ? "bg-emerald-600 text-white shadow-lg shadow-emerald-600/20" : "text-gray-400 hover:text-white hover:bg-white/5"}`}
                 >{f}</button>
               ))}
             </div>
           </div>
 
           <div className="relative">
-            <Search className="absolute left-3 top-2.5 h-4 w-4 text-gray-500" />
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-500" />
             <input
               type="text"
               placeholder={fnoFilter === "OPT" ? 'Search e.g. "NIFTY 24250 CE"...' : "Search ticker..."}
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full pl-9 pr-4 py-1.5 bg-black border border-brand-border rounded text-xs text-white placeholder-gray-500 focus:outline-none focus:border-emerald-500/20 font-sans"
+              className="w-full pl-9 pr-4 py-2.5 bg-black/60 border border-brand-border rounded-lg text-sm text-white placeholder-gray-500 focus:outline-none focus:border-emerald-500/30 focus:bg-black/80 font-sans transition-all"
             />
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto divide-y divide-brand-border bg-black/10 p-2 space-y-1">
+        <div className="flex-1 overflow-y-auto divide-y divide-brand-border bg-black/5 p-3 space-y-2">
           {matchedOptions.length > 0 ? matchedOptions.map((opt) => {
             const isSelected = selectedInstrument?.ref_id === opt.ref_id;
             const strike = Math.round((opt.strike_price || 0) / 100);
             return (
-              <div key={opt.ref_id} onClick={() => onSelectInstrument(opt)}
-                className={`p-3 rounded transition-all duration-150 flex items-center justify-between cursor-pointer ${isSelected ? "bg-emerald-500/10 border border-emerald-500/40 text-white" : "hover:bg-white/[0.02] text-gray-300 border border-transparent"}`}
-              >
-                <div className="space-y-1">
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-xs font-semibold text-white tracking-tight">{opt.asset}</span>
-                    <span className="text-[9px] px-1 bg-black border border-brand-border rounded font-mono">{opt.option_type}</span>
-                    <span className="text-[9px] px-1 bg-black border border-brand-border rounded font-mono">{strike}</span>
+              <div className={`p-3 rounded-lg transition-all duration-150 flex items-center justify-between cursor-pointer glass-surface-sm ${isSelected ? "bg-emerald-500/10 border border-emerald-500/40 text-white" : "hover:bg-white/[0.03] text-gray-300 border border-transparent"}`}>
+                <div className="space-y-1.5">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-semibold text-white tracking-tight">{opt.asset}</span>
+                    <span className="text-xs px-1.5 bg-black border border-brand-border rounded font-mono">{opt.option_type}</span>
+                    <span className="text-xs px-1.5 bg-black border border-brand-border rounded font-mono">{strike}</span>
                   </div>
-                  <span className="text-[10px] text-gray-500 font-mono">
+                  <span className="text-xs text-gray-500 font-mono">
                     Exp: {opt.expiry?.toString().slice(0,4)}-{opt.expiry?.toString().slice(4,6)}-{opt.expiry?.toString().slice(6)} | Lot: {opt.lot_size}
                   </span>
                 </div>
@@ -181,32 +177,32 @@ export default function Screener({
               <div
                 key={item.asset}
                 onClick={() => handleSelectFnoAsset(item.asset)}
-                className={`p-3 rounded transition-all duration-150 flex items-center justify-between cursor-pointer ${
+                className={`p-3 rounded-lg transition-all duration-150 flex items-center justify-between cursor-pointer glass-surface-sm ${
                   isSelected
                     ? "bg-emerald-500/10 border border-emerald-500/40 text-white"
-                    : "hover:bg-white/[0.02] text-gray-300 border border-transparent"
+                    : "hover:bg-white/[0.03] text-gray-300 border border-transparent"
                 }`}
               >
-                <div className="space-y-1">
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-xs font-semibold text-white tracking-tight">{item.asset}</span>
-                    <span className="text-[9px] px-1 bg-black border border-brand-border text-gray-400 rounded font-mono">F&O</span>
+                <div className="space-y-1.5">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-semibold text-white tracking-tight">{item.asset}</span>
+                    <span className="text-xs px-2 bg-black/40 border border-brand-border text-gray-400 rounded font-mono">F&O</span>
                   </div>
                 </div>
                 <div className="text-right space-y-0.5">
                   {price != null ? (
                     <>
-                      <span className="block font-mono text-xs font-bold text-white">
+                      <span className="block font-mono text-sm font-bold text-white">
                         ₹{price.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                       </span>
                       {change !== 0 && (
-                        <div className={`flex items-center justify-end text-[10px] font-semibold font-mono ${change >= 0 ? "text-brand-green" : "text-brand-red"}`}>
+                        <div className={`flex items-center justify-end text-xs font-semibold font-mono ${change >= 0 ? "text-brand-green" : "text-brand-red"}`}>
                           {change >= 0 ? "+" : ""}{(change * 100).toFixed(2)}%
                         </div>
                       )}
                     </>
                   ) : (
-                    <span className="text-[9px] text-slate-500">Loading...</span>
+                    <span className="text-xs text-slate-500">N/A</span>
                   )}
                 </div>
               </div>
@@ -233,39 +229,39 @@ export default function Screener({
   });
 
   return (
-    <div className="bg-brand-card border border-brand-border rounded-lg flex flex-col h-[650px] overflow-hidden shadow-2xl">
+    <div className="glass-surface border border-brand-border rounded-xl flex flex-col h-[650px] overflow-hidden shadow-2xl glass-enter">
       {/* Search and Filters Header */}
-      <div className="p-4 border-b border-brand-border bg-black/20 space-y-3">
+      <div className="p-3 border-b border-brand-border glass-base/50 space-y-3">
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <BookOpen className="h-4 w-4 text-indigo-400" />
-            <h2 className="font-serif italic text-sm text-gray-400">Cash Equity Spot</h2>
+          <div className="flex items-center gap-2.5">
+            <BookOpen className="h-4.5 w-4.5 text-indigo-400" />
+            <h2 className="font-serif italic text-base text-gray-200 tracking-tight">Cash Equity Spot</h2>
           </div>
           <button
             onClick={onRefreshQuotes}
             disabled={isLoading}
-            className="p-1.5 bg-black hover:bg-white/5 disabled:opacity-50 text-gray-300 rounded border border-brand-border transition-colors cursor-pointer"
+            className="p-2 bg-black/60 hover:bg-white/5 disabled:opacity-50 text-gray-300 rounded-lg border border-brand-border transition-colors cursor-pointer"
             title="Refresh Quotes"
           >
-            <RefreshCw className={`h-3.5 w-3.5 ${isLoading ? "animate-spin" : ""}`} />
+            <RefreshCw className={`h-4 w-4 ${isLoading ? "animate-spin" : ""}`} />
           </button>
         </div>
 
         {/* Search input */}
         <div className="relative">
-          <Search className="absolute left-3 top-2.5 h-4 w-4 text-gray-500" />
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-500" />
           <input
             type="text"
             placeholder="Search stock ticker..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full pl-9 pr-4 py-1.5 bg-black border border-brand-border rounded text-xs text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500/20 font-sans"
+            className="w-full pl-9 pr-4 py-2.5 bg-black/60 border border-brand-border rounded-lg text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500/30 focus:bg-black/80 font-sans transition-all"
           />
         </div>
       </div>
 
       {/* Screener list */}
-      <div className="flex-1 overflow-y-auto divide-y divide-brand-border bg-black/10 p-2 space-y-1">
+      <div className="flex-1 overflow-y-auto divide-y divide-brand-border bg-black/5 p-3 space-y-2">
         {filteredInstruments.length === 0 ? (
           <div className="p-8 text-center text-gray-500 text-xs font-serif italic">
             No equity instruments found.
@@ -281,28 +277,28 @@ export default function Screener({
               <div
                 key={inst.ref_id}
                 onClick={() => onSelectInstrument(inst)}
-                className={`p-3 rounded transition-all duration-150 flex items-center justify-between cursor-pointer ${
+                className={`p-3 rounded-lg transition-all duration-150 flex items-center justify-between cursor-pointer glass-surface-sm ${
                   isSelected
                     ? "bg-indigo-500/10 border border-indigo-500/40 text-white"
-                    : "hover:bg-white/[0.02] text-gray-300 border border-transparent"
+                    : "hover:bg-white/[0.03] text-gray-300 border border-transparent"
                 }`}
               >
-                <div className="space-y-1">
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-xs font-semibold text-white tracking-tight">
+                <div className="space-y-1.5">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-semibold text-white tracking-tight">
                       {inst.stock_name}
                     </span>
-                    <span className="text-[9px] px-1 bg-black border border-brand-border text-gray-400 rounded font-mono">
+                    <span className="text-xs px-2 bg-black/40 border border-brand-border text-gray-400 rounded font-mono">
                       {inst.exchange}
                     </span>
                   </div>
 
                   <div className="flex items-center gap-2">
-                    <span className="text-[10px] text-gray-500 font-mono">
+                    <span className="text-xs text-gray-500 font-mono">
                       Equity Segment
                     </span>
                     {isSelected && (
-                      <span className="text-[9px] px-1 bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 rounded font-semibold animate-fade-in">
+                      <span className="text-xs px-2 bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 rounded font-semibold animate-fade-in">
                         Selected
                       </span>
                     )}
@@ -312,13 +308,13 @@ export default function Screener({
                 {/* Price indicators */}
                 <div className="text-right space-y-0.5">
                   {price != null ? (
-                    <span className="block font-mono text-xs font-bold text-white">
+                    <span className="block font-mono text-sm font-bold text-white">
                       ₹{price.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                     </span>
                   ) : (
-                    <span className="text-[9px] text-slate-500">Loading...</span>
+                    <span className="text-xs text-slate-500">N/A</span>
                   )}
-                  <div className={`flex items-center justify-end text-[10px] font-semibold font-mono ${
+                  <div className={`flex items-center justify-end text-xs font-semibold font-mono ${
                     change >= 0 ? "text-brand-green" : "text-brand-red"
                   }`}>
                     {change >= 0 ? "+" : ""}

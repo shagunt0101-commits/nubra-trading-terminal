@@ -233,17 +233,15 @@ export default function OptionBuyingEngine({
   };
 
   return (
-    <div className="bg-black/40 border border-brand-border rounded-xl p-4 font-sans space-y-4 shadow-xl">
-      <div className="flex items-start gap-3 border-b border-brand-border pb-3">
+    <div className="glass-surface border border-brand-border rounded-xl flex flex-col flex-1 min-h-0 overflow-hidden shadow-2xl glass-enter">
+      {/* Header */}
+      <div className="p-3 glass-base/50 border-b border-brand-border flex items-center justify-between gap-3">
         <div className="flex items-center gap-2 min-w-0 flex-1">
           <div className="p-2 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 shrink-0">
             <Zap className="h-4 w-4 animate-pulse" />
           </div>
           <div className="min-w-0">
-            <h3 className="text-sm font-bold text-white tracking-wide uppercase font-mono flex items-center gap-2">
-              <span className="truncate">Option Buying Momentum Engine</span>
-              <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 font-mono shrink-0">LIVE TELEMETRY</span>
-            </h3>
+            <h2 className="font-serif italic text-sm text-gray-200 truncate">Option Buying Momentum Engine</h2>
             <p className="text-[11px] text-gray-400 truncate">Real-time technical & option chain surveillance for {activeSymbol}</p>
           </div>
         </div>
@@ -251,21 +249,15 @@ export default function OptionBuyingEngine({
           <button
             onClick={handleRefresh}
             disabled={isAnalyzing}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded bg-brand-green/20 hover:bg-brand-green/30 border border-brand-green/40 text-brand-green text-xs font-mono font-bold cursor-pointer transition-all"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded bg-brand-green/20 hover:bg-brand-green/30 border border-brand-green/40 text-brand-green text-[11px] font-mono font-bold cursor-pointer transition-all"
           >
-            <RefreshCw className={`h-3 w-3 ${isAnalyzing ? "animate-spin" : ""}`} />
+            <RefreshCw className={`h-3.5 w-3.5 ${isAnalyzing ? "animate-spin" : ""}`} />
             <span>Rescan Momentum</span>
           </button>
         </div>
       </div>
 
-      {!instrument ? (
-        <div className="text-center py-10 text-gray-500 text-xs font-mono">
-          Select an instrument from the terminal header or screener to initialize the Option Buying Engine.
-        </div>
-      ) : (
-        <div className="space-y-4">
-          {/* Status Banner */}
+      <div className="flex-1 overflow-y-auto pr-1 space-y-3">
           <div className={`p-3 rounded-lg border flex items-center gap-3 ${
             !isAlignedWithTrend ? "bg-amber-500/10 border-amber-500/30 text-amber-300"
             : monitoringStatus === "confirmed" ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300"
@@ -297,26 +289,26 @@ export default function OptionBuyingEngine({
 
           {/* Option Type & Key Parameters */}
           <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-            <div className="bg-black/30 border border-brand-border p-3 rounded-lg space-y-1">
+            <div className="glass-surface-sm border border-brand-border p-3 rounded-lg space-y-1">
               <span className="text-[10px] font-mono text-gray-500 uppercase">Option Bias</span>
               <div className="flex items-center gap-1 mt-1">
                 <button onClick={() => setSelectedOptType("CE")}
                   className={`flex-1 py-1 rounded text-xs font-mono font-bold cursor-pointer transition-all ${selectedOptType === "CE" ? "bg-emerald-500 text-black shadow" : "bg-black/40 text-gray-400 hover:text-white"}`}>CALL (CE)</button>
                 <button onClick={() => setSelectedOptType("PE")}
-                  className={`flex-1 py-1 rounded text-xs font-mono font-bold cursor-pointer transition-all ${selectedOptType === "PE" ? "bg-rose-500 text-black shadow" : "bg-black/40 text-gray-400 hover:text-white"}`}>PUT (PE)</button>
+                  className={`flex-1 py-1 rounded text-xs font-mono font-bold cursor-pointer transition-all ${selectedOptType === "PE" ? "bg-rose-500 text-black shadow" : "glass-base/80 text-gray-400 hover:text-white"}`}>PUT (PE)</button>
               </div>
             </div>
-            <div className="bg-black/30 border border-brand-border p-3 rounded-lg">
+            <div className="glass-surface-sm border border-brand-border p-3 rounded-lg">
               <span className="text-[10px] font-mono text-gray-500 uppercase">Target Strike</span>
               <p className="text-sm font-bold font-mono text-white mt-1">{targetStrike} {selectedOptType}</p>
               <span className="text-[10px] font-mono text-emerald-400">ATM/ITM Spread</span>
             </div>
-            <div className="bg-black/30 border border-brand-border p-3 rounded-lg">
+            <div className="glass-surface-sm border border-brand-border p-3 rounded-lg">
               <span className="text-[10px] font-mono text-gray-500 uppercase">Est. Entry Premium</span>
               <p className="text-sm font-bold font-mono text-brand-green mt-1">₹{estimatedPremium}</p>
               <span className="text-[10px] font-mono text-gray-400">Lot Size: {instrument.lot_size || 75}</span>
             </div>
-            <div className="bg-black/30 border border-brand-border p-3 rounded-lg">
+            <div className="glass-surface-sm border border-brand-border p-3 rounded-lg">
               <span className="text-[10px] font-mono text-gray-500 uppercase">R:R Target</span>
               <p className="text-sm font-bold font-mono text-indigo-400 mt-1">1 : {rrRatio} (₹{targetPrice})</p>
               <span className="text-[10px] font-mono text-rose-400">Stop: ₹{stopLoss}</span>
@@ -326,7 +318,7 @@ export default function OptionBuyingEngine({
           {/* Real Signal Cards */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
             {/* 1. Price Action & Momentum */}
-            <div className="bg-black/30 border border-brand-border p-3 rounded-lg space-y-2">
+            <div className="glass-surface-sm border border-brand-border p-3 rounded-lg space-y-2">
               <div className="flex items-center justify-between text-xs font-mono">
                 <span className="text-gray-400 font-bold flex items-center gap-1.5">
                   <BarChart3 className="h-3.5 w-3.5 text-brand-green" /> Price Action
@@ -341,7 +333,7 @@ export default function OptionBuyingEngine({
             </div>
 
             {/* 2. Technical Indicators */}
-            <div className="bg-black/30 border border-brand-border p-3 rounded-lg space-y-2">
+            <div className="glass-surface-sm border border-brand-border p-3 rounded-lg space-y-2">
               <div className="flex items-center justify-between text-xs font-mono">
                 <span className="text-gray-400 font-bold flex items-center gap-1.5">
                   <Activity className="h-3.5 w-3.5 text-indigo-400" /> Technical Oscillators
@@ -356,7 +348,7 @@ export default function OptionBuyingEngine({
             </div>
 
             {/* 3. Option Chain & OI Surveillance */}
-            <div className="bg-black/30 border border-brand-border p-3 rounded-lg space-y-2">
+            <div className="glass-surface-sm border border-brand-border p-3 rounded-lg space-y-2">
               <div className="flex items-center justify-between text-xs font-mono">
                 <span className="text-gray-400 font-bold flex items-center gap-1.5">
                   <ShieldAlert className="h-3.5 w-3.5 text-amber-400" /> Option Chain & PCR
@@ -372,7 +364,7 @@ export default function OptionBuyingEngine({
           </div>
 
           {/* Action Button */}
-          <div className="pt-2 flex items-center gap-3">
+          <div className="pt-2 flex items-center gap-3 pb-1">
             <button onClick={handleDeployTrade}
               className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded text-xs font-bold font-mono tracking-wider uppercase cursor-pointer shadow-lg transition-all ${
                 monitoringStatus === "confirmed"
@@ -384,8 +376,7 @@ export default function OptionBuyingEngine({
               <ArrowRight className="h-4 w-4" />
             </button>
           </div>
-        </div>
-      )}
+      </div>
     </div>
   );
 }

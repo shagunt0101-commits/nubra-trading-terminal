@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import fs from "fs";
 import path from "path";
+import logger from "./logger.js";
 
 const NUBRA_ENV = process.env.NUBRA_ENV || "PROD";
 const NUBRA_PHONE = process.env.NUBRA_PHONE || "";
@@ -33,7 +34,7 @@ function saveSession(token: string) {
   } catch (_) {}
 }
 
-function clearSession() {
+export function clearSession() {
   if (process.env.VERCEL) return;
   try {
     if (fs.existsSync(SESSION_FILE)) fs.unlinkSync(SESSION_FILE);
@@ -93,13 +94,24 @@ export function generateTOTP(secret: string): string {
     }
     return otp;
   } catch (error: any) {
-    console.error("Error generating TOTP:", error.message);
+    logger.error({ err: error }, "Error generating TOTP");
     return "000000";
   }
 }
 
+let loginInFlight: Promise<string> | null = null;
+
 // Performs step-by-step automated login using TOTP and Pin
-export async function nubraLogin(): Promise<string> {
+// Single-flight: concurrent first requests (App fires 4 parallel fetches at
+// mount) would each trigger a duplicate TOTP login and stall the boot path.
+export function nubraLogin(): Promise<string> {
+  if (!loginInFlight) {
+    loginInFlight = nubraLoginInner().finally(() => { loginInFlight = null; });
+  }
+  return loginInFlight;
+}
+
+async function nubraLoginInner(): Promise<string> {
   loginStatus = "PENDING";
   loginError = "";
   try {
@@ -108,7 +120,7 @@ export async function nubraLogin(): Promise<string> {
     }
 
     const totpCode = generateTOTP(NUBRA_TOTP_SECRET);
-    console.log(`[Nubra] TOTP generated and sent for phone login`);
+    logger.info("[Nubra] TOTP generated, logging in");
 
     // Step 1: Login via TOTP to get auth_token
     const loginRes = await fetch(`${BASE_URL}/totp/login`, {
@@ -174,12 +186,12 @@ export async function nubraLogin(): Promise<string> {
     sessionToken = token;
     saveSession(token);
     loginStatus = "LOGGED_IN";
-    console.log("[Nubra] Successfully logged in. Session token established.");
+    logger.info("[Nubra] Login successful");
     return sessionToken;
   } catch (err: any) {
     loginError = err.message;
     loginStatus = "FAILED";
-    console.error("[Nubra] Login error:", err.message);
+    logger.error({ err }, "[Nubra] Login error");
     return "";
   }
 }
@@ -298,7 +310,7 @@ async function nubraRequest(endpoint: string, options: RequestInit = {}): Promis
 
   // Handle Session Expiry (440) — token is dead, clear it
   if (res.status === 440) {
-    console.log("[Nubra] Session expired (440). Clearing stale session.");
+    logger.warn("[Nubra] Session expired (440), clearing token");
     clearSession();
     sessionToken = "";
     throw new Error("Session expired. Please login again via OTP.");
@@ -373,3 +385,58 @@ export const nubraApi = {
     return nubraRequest(`sentinel/orders${query}`);
   }
 };
+
+// Native intervals supported by Nubra
+const BROKER_INTERVALS = new Set(["1s","1m","2m","3m","5m","15m","30m","1h","1d","1w","1mt"]);
+
+// Indices must be queried with type "INDEX" — "STOCK" returns "ticker not found"
+const INDEXES = new Set(["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]);
+
+function resolveAssetType(symbol: string): string {
+  return INDEXES.has(symbol.toUpperCase()) ? "INDEX" : "STOCK";
+}
+
+export async function fetchCandlesInternal(symbol: string, exchange: string, interval: string, count: number): Promise<any[]> {
+  const brokerInterval = BROKER_INTERVALS.has(interval) ? interval : "1m";
+  const stepMins: Record<string, number> = { "1s": 1/60, "1m": 1, "2m": 2, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "1d": 1440, "1w": 10080, "1mt": 43200 };
+  const step = stepMins[interval] || 5;
+  const today = new Date();
+  const daysBack = Math.max(1, Math.ceil((step * count * 60 * 1000) / (24 * 60 * 60 * 1000) * 2));
+  const startDate = new Date(today.getTime() - daysBack * 24 * 60 * 60 * 1000).toISOString();
+  const endDate = today.toISOString();
+
+  const query = { query: [{ exchange, type: resolveAssetType(symbol), values: [symbol], fields: ["open", "high", "low", "close", "cumulative_volume"], startDate, endDate, interval: brokerInterval, intraDay: false, realTime: false }] };
+  let candles: any[] = [];
+  try {
+    const data = await nubraApi.getHistoricalData(query);
+    if (data?.result?.[0]) {
+      const symData = data.result[0].values[0][symbol];
+      if (symData?.close) {
+        const times = symData.close.map((p: any) => p.ts);
+        candles = times.map((ts: number, idx: number) => ({ ts, open: symData.open[idx].v / 100, high: symData.high[idx].v / 100, low: symData.low[idx].v / 100, close: symData.close[idx].v / 100, volume: symData.cumulative_volume[idx].v }));
+      }
+    }
+  } catch (_) {}
+  // No synthetic fallback — return only real broker data
+  if (candles.length > count) candles = candles.slice(candles.length - count);
+  return candles;
+}
+
+/** Fetch option symbol (e.g., "NIFTY25JUL24100CE") for a given strike and type from option chain */
+export async function fetchOptionSymbol(symbol: string, strike: number, optType: "CE" | "PE", exchange = "NSE"): Promise<string | null> {
+  try {
+    const chain = await nubraApi.getOptionChain(symbol, undefined, exchange);
+    const entries = chain?.chain?.[optType.toLowerCase()];
+    if (!entries) return null;
+    const arr = Object.values(entries) as any[];
+    const match = arr.find((o: any) => Math.round(o.sp / 100) === strike);
+    return match?.symbol || null;
+  } catch { return null; }
+}
+
+/** Fetch OHLC candles for a specific option strike */
+export async function fetchOptionCandles(symbol: string, strike: number, optType: "CE" | "PE", exchange: string, interval: string, count: number): Promise<any[]> {
+  const optSym = await fetchOptionSymbol(symbol, strike, optType, exchange);
+  if (!optSym) return [];
+  return fetchCandlesInternal(optSym, exchange, interval, count);
+}

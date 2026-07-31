@@ -1,13 +1,14 @@
-import React, { createContext, useContext, useState, ReactNode } from "react";
-import { Instrument, ChartDataPoint } from "../types";
+import React, { createContext, useContext, useState, ReactNode, useCallback } from "react";
+import { Instrument, ChartDataPoint, OptionChainData } from "../types";
 
 interface MarketDataContextType {
   selectedInstrument: Instrument | null;
   setSelectedInstrument: (inst: Instrument | null) => void;
   chartData: ChartDataPoint[];
   setChartData: (data: ChartDataPoint[]) => void;
-  optionChainData: any;
-  setOptionChainData: (data: any) => void;
+  optionChainData: OptionChainData | null;
+  setOptionChainData: (data: OptionChainData | null) => void;
+  initializeDefaultInstrument: (instruments: Instrument[]) => void;
 }
 
 const MarketDataContext = createContext<MarketDataContextType | undefined>(undefined);
@@ -15,7 +16,16 @@ const MarketDataContext = createContext<MarketDataContextType | undefined>(undef
 export function MarketDataProvider({ children }: { children: ReactNode }) {
   const [selectedInstrument, setSelectedInstrument] = useState<Instrument | null>(null);
   const [chartData, setChartData] = useState<ChartDataPoint[]>([]);
-  const [optionChainData, setOptionChainData] = useState<any>(null);
+  const [optionChainData, setOptionChainData] = useState<OptionChainData | null>(null);
+
+  const initializeDefaultInstrument = useCallback((instruments: Instrument[]) => {
+    if (!selectedInstrument) {
+      const niftyInst = instruments.find((i) => i.asset === "NIFTY" && i.derivative_type !== "OPT");
+      if (niftyInst) {
+        setSelectedInstrument(niftyInst);
+      }
+    }
+  }, [selectedInstrument, setSelectedInstrument]);
 
   return (
     <MarketDataContext.Provider
@@ -26,6 +36,7 @@ export function MarketDataProvider({ children }: { children: ReactNode }) {
         setChartData,
         optionChainData,
         setOptionChainData,
+        initializeDefaultInstrument,
       }}
     >
       {children}
