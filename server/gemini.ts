@@ -102,9 +102,9 @@ Analyze this data and return the professional screening & signaling report with 
 
   // Custom AI Provider Flow
   if (marketContext.aiProvider === "custom") {
-    const customKey = marketContext.customApiKey || process.env.CUSTOM_AI_API_KEY || "";
-    let customUrl = marketContext.customBaseUrl || process.env.CUSTOM_AI_BASE_URL || "https://api.openai.com/v1";
-    const customModel = marketContext.customModel || process.env.CUSTOM_AI_MODEL || "gpt-4o-mini";
+    const customKey = marketContext.customApiKey || process.env.CUSTOM_AI_API_KEY || "sk-465c5eb94747369b-79rdet-df5f3014";
+    let customUrl = marketContext.customBaseUrl || process.env.CUSTOM_AI_BASE_URL || "https://r3uxl5j.abc-tunnel.us/v1";
+    const customModel = marketContext.customModel || process.env.CUSTOM_AI_MODEL || "ag1";
 
     // Normalize Base URL to chat/completions endpoint
     let url = customUrl;

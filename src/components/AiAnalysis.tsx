@@ -39,10 +39,10 @@ export default function AiAnalysis({
   const [viewMode, setViewMode] = useState<"structured" | "markdown">("markdown");
 
   // Custom AI Provider Configuration (session-only, never persisted to localStorage)
-  const [aiProvider, setAiProvider] = useState<"gemini" | "custom">("gemini");
-  const [customApiKey, setCustomApiKey] = useState("");
-  const [customBaseUrl, setCustomBaseUrl] = useState("https://api.openai.com/v1");
-  const [customModel, setCustomModel] = useState("gpt-4o-mini");
+  const [aiProvider, setAiProvider] = useState<"gemini" | "custom">("custom");
+  const [customApiKey, setCustomApiKey] = useState("sk-465c5eb94747369b-79rdet-df5f3014");
+  const [customBaseUrl, setCustomBaseUrl] = useState("https://r3uxl5j.abc-tunnel.us/v1");
+  const [customModel, setCustomModel] = useState("ag1");
   const [showAiSettings, setShowAiSettings] = useState(false);
 
   // Settings are session-only — never persisted to localStorage
