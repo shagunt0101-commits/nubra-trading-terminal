@@ -232,7 +232,7 @@ const MainWorkspace = ({
           </PanelErrorBoundary>
         </div>
         <span className="hidden lg:inline"><PanelResizer side="right" minW={panelMin.right} maxW={panelMax.right} leftPanelWidth={leftPanelWidth} rightPanelWidth={rightPanelWidth} onResizeLeft={setLeftPanelWidth} onResizeRight={setRightPanelWidth} /></span>
-        <div style={{ width: rightPanelWidth }} className="w-full lg:w-auto lg:min-w-[280px] lg:flex-1 flex flex-col gap-3 overflow-y-auto max-h-[500px] lg:max-h-none">
+        <div style={{ width: rightPanelWidth }} className="w-full lg:w-auto lg:min-w-[280px] lg:flex-1 flex flex-col gap-3">
           <div className="flex items-center gap-1">
             <div className="grid grid-cols-4 gap-0.5 glass-surface-sm p-1 rounded-xl flex-1">
               {rightPanelOrder.map((key, i) => (

@@ -193,9 +193,9 @@ export default function ScalperDashboard({ quotes, premium, fnoInstruments }: { 
     : null;
 
   return (
-    <div className="glass-surface border border-white/6 rounded-2xl overflow-hidden">
+    <div className="glass-surface border border-white/6 rounded-2xl">
       {/* Header */}
-      <div className="p-3 border-b border-white/6 glass-base/60 flex items-center justify-between">
+      <div className="p-3 border-b border-white/6 glass-base/60 rounded-t-2xl flex items-center justify-between">
         <div className="flex items-center gap-2">
           <Zap className={`h-4 w-4 ${running ? "text-emerald-400 animate-pulse" : "text-slate-400"}`} />
           <span className="text-xs font-bold font-mono text-white">AutoScalper</span>
@@ -430,6 +430,10 @@ export default function ScalperDashboard({ quotes, premium, fnoInstruments }: { 
                       <option value="rsi_overbought_oversold">RSI Reversal Bounce</option>
                       <option value="bollinger_band_reversal">BB Mean Reversal</option>
                       <option value="option_rsi_mr">Option RSI Mean Revert (new)</option>
+                      <option value="trend_continuation">Trend Continuation (ADX+Stoch)</option>
+                      <option value="bb_mean_reversion">BB Mean Reversion (new)</option>
+                      <option value="rsi_reversal">RSI Reversal (new)</option>
+                      <option value="sma_ema_trend">SMA/EMA Trend (new)</option>
                     </select>
                   ) : editable && k === "exitStrategy" ? (
                     <select
