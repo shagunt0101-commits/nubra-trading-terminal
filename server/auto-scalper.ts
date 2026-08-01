@@ -64,9 +64,18 @@ export interface ScalperConfig {
   expiryFilterCE: string;          // skip CE after this HH:MM IST on expiry day (default "12:30")
   expiryFilterAll: string;         // skip all after this HH:MM IST on expiry day (default "13:30")
   exitStrategy: string;            // "standard" | "option_rsi_mr" — exit logic ("" uses strategy field)
+  exitMode: "sl_tp" | "phase";     // "sl_tp" = plain SL/TP; "phase" = BE-lock + trail (option_rsi_mr parity)
+  trailPct: number;                // phase mode: trail % of max premium seen (default 80)
+  phase1TargetPct: number;         // phase mode: % gain to lock breakeven (default = premiumTargetPct)
   maxConcurrentTrades: number;     // max active trades at once (default 1)
   maxDailyLoss: number;            // max total loss pts per session (default 50)
   maxPositionSizePct: number;      // max position % of available margin (default 20)
+  // sma_ema_cross periods (grid-optimized; PGHO promoted 10/30)
+  smaPeriod: number;
+  emaPeriod: number;
+  // bollinger_band_reversal (PGHO 1m promotion: 20/2.5)
+  bbPeriod: number;
+  bbStdDev: number;
 }
 
 export interface ScalperSignal {
@@ -152,9 +161,16 @@ const DEFAULT_CONFIG: ScalperConfig = {
   expiryFilterCE: "12:30",
   expiryFilterAll: "13:30",
   exitStrategy: "",
+  exitMode: "sl_tp",
+  trailPct: 80,
+  phase1TargetPct: 0, // 0 → defaults to premiumTargetPct at exit time
   maxConcurrentTrades: 1,
   maxDailyLoss: 50,
   maxPositionSizePct: 20,
+  smaPeriod: 10,
+  emaPeriod: 30,
+  bbPeriod: 20,
+  bbStdDev: 2,
 };
 
 // Per-instrument overrides — each instrument's risk profile (volatility, premium
@@ -577,17 +593,19 @@ export class AutoScalper {
   }
 
   private async computeSmaEma(spot: number, candles: any[], closes: number[]): Promise<ScalperSignal | null> {
-    if (closes.length < 30) return null;
-    const sma20 = calculateSMA(closes, 20);
-    const ema50 = calculateEMA(closes, 50);
+    const smaP = this.config.smaPeriod || 10;
+    const emaP = this.config.emaPeriod || 30;
+    if (closes.length < emaP + 2) return null;
+    const sma = calculateSMA(closes, smaP);
+    const ema = calculateEMA(closes, emaP);
     const lastIdx = closes.length - 1;
     const price = closes[lastIdx];
     const prev = closes[lastIdx - 1];
-    const isBull = price > sma20[lastIdx] && prev <= sma20[lastIdx - 1] && ema50[lastIdx] > ema50[lastIdx - 1];
-    const isBear = price < sma20[lastIdx] && prev >= sma20[lastIdx - 1] && ema50[lastIdx] < ema50[lastIdx - 1];
+    const isBull = price > sma[lastIdx] && prev <= sma[lastIdx - 1] && ema[lastIdx] > ema[lastIdx - 1];
+    const isBear = price < sma[lastIdx] && prev >= sma[lastIdx - 1] && ema[lastIdx] < ema[lastIdx - 1];
     if (!isBull && !isBear) return null;
     const dir = isBull ? "BUY_CE" as const : "BUY_PE" as const;
-    const reasons = [isBull ? "SMA20 cross↑ EMA50↑" : "SMA20 cross↓ EMA50↓"];
+    const reasons = [isBull ? `SMA${smaP} cross↑ EMA${emaP}↑` : `SMA${smaP} cross↓ EMA${emaP}↓`];
     return this.resolveStrikePremium(spot, isBull, 65, reasons, 50, "flat", false, 0, 0, 1, 15);
   }
 
@@ -604,8 +622,10 @@ export class AutoScalper {
   }
 
   private async computeBB(spot: number, candles: any[], closes: number[]): Promise<ScalperSignal | null> {
-    if (closes.length < 30) return null;
-    const bb = calculateBollingerBands(closes, 20, 2);
+    const bbPeriod = this.config.bbPeriod || 20;
+    const bbStdDev = this.config.bbStdDev || 2;
+    if (closes.length < bbPeriod + 10) return null;
+    const bb = calculateBollingerBands(closes, bbPeriod, bbStdDev);
     const lastIdx = closes.length - 1;
     const price = closes[lastIdx];
     const prev = closes[lastIdx - 1];
@@ -1030,16 +1050,42 @@ export class AutoScalper {
   }
 
   private async checkStandardExit(trade: TradeRecord, currentPremium: number) {
-    // Check stop loss
-    if (currentPremium <= trade.stopLoss) {
-      await this.exitPosition(currentPremium, `SL_HIT`);
-      return;
-    }
+    const phase = this.config.exitMode === "phase" || this.config.exitStrategy === "option_rsi_mr";
 
-    // Check target
-    if (currentPremium >= trade.target) {
-      await this.exitPosition(currentPremium, `TARGET_HIT`);
-      return;
+    if (phase) {
+      // ── Phase mode (option_rsi_mr parity): SL → BE-lock → 80% trail ──
+      if (!trade.phase1TargetHit) {
+        if (currentPremium <= trade.stopLoss) {
+          await this.exitPosition(currentPremium, `SL_HIT`);
+          return;
+        }
+        const phase1Pct = this.config.phase1TargetPct || this.config.premiumTargetPct;
+        if (currentPremium >= trade.entryPremium * (1 + phase1Pct / 100)) {
+          trade.phase1TargetHit = true;
+          trade.maxPriceSeen = currentPremium;
+          trade.stopLoss = trade.entryPremium; // lock breakeven
+          this.log("EXIT", `Phase 2: target hit (+${phase1Pct}%), SL moved to breakeven (${trade.stopLoss})`);
+        }
+        return;
+      }
+      if (currentPremium > (trade.maxPriceSeen || trade.entryPremium)) {
+        trade.maxPriceSeen = currentPremium;
+      }
+      const trailStop = (trade.maxPriceSeen || trade.entryPremium) * (this.config.trailPct / 100);
+      if (currentPremium <= trailStop) {
+        await this.exitPosition(currentPremium, `TRAIL_SL_${this.config.trailPct} (max: ${trade.maxPriceSeen?.toFixed(1)}, trail: ${trailStop.toFixed(1)})`);
+        return;
+      }
+    } else {
+      // ── Plain SL/TP ──
+      if (currentPremium <= trade.stopLoss) {
+        await this.exitPosition(currentPremium, `SL_HIT`);
+        return;
+      }
+      if (currentPremium >= trade.target) {
+        await this.exitPosition(currentPremium, `TARGET_HIT`);
+        return;
+      }
     }
 
     // Check market hours for forced square-off (15:25 IST)

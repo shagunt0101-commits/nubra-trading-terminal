@@ -19,7 +19,8 @@ describe("runBacktest spot strategy", () => {
     expect(r.trades.length).toBeGreaterThan(0);
     for (const t of r.trades) {
       expect(t.entryPrice).toBeGreaterThan(0);
-      expect(t.exitTime).toBeGreaterThan(t.entryTime);
+      // same-bar exit allowed: entry fills at open, TP/SL can trigger at that bar's high/low
+      expect(t.exitTime).toBeGreaterThanOrEqual(t.entryTime);
       expect(["SL", "TP", "TIME", "EOD"].includes(t.exitReason)).toBe(true);
     }
     expect(r.summary.totalTrades).toBe(r.trades.length);
