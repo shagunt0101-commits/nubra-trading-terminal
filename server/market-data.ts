@@ -1,5 +1,5 @@
 import logger from "./logger.js";
-import { nubraApi } from "./nubra.js";
+import * as nb from "./nubra.js";
 
 export const BROKER_INTERVALS = new Set(["1s","1m","2m","3m","5m","15m","30m","1h","1d","1w","1mt"]);
 
@@ -8,6 +8,29 @@ const INDEXES = new Set(["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX
 
 function resolveAssetType(symbol: string): string {
   return INDEXES.has(symbol.toUpperCase()) ? "INDEX" : "STOCK";
+}
+
+// Trading-day window for `count` bars at `stepMin` minutes: bars cover
+// 6.25h sessions, so calendar days = bars*step / (6.25h) * 7/5 (weekends)
+// * 1.15 (holiday margin). Shared by fetchCandles and fetchCandlesInternal —
+// the old *2 formula over-covered and cut 45d runs to ~18.6 trading days.
+export function daysBackFor(count: number, stepMin: number): number {
+  return Math.max(1, Math.ceil(((stepMin * count * 60) / (6.25 * 3600)) * (7 / 5) * 1.15));
+}
+
+// Broker returns cumulative_volume (monotone running total) — diff to per-bar
+// volume for s2 volZ/VWAP. If any diff is negative the broker gave per-bar
+// semantics; keep raw then.
+export function toPerBarVolume(cv: number[]): number[] {
+  let sawNegative = false;
+  const diffs: number[] = [];
+  for (let i = 0; i < cv.length; i++) {
+    const raw = cv[i];
+    const v = i === 0 ? raw : Math.max(0, raw - cv[i - 1]);
+    if (i > 0 && raw < cv[i - 1]) sawNegative = true;
+    diffs.push(v);
+  }
+  return sawNegative ? cv : diffs;
 }
 
 // 10s TTL cache — WS broadcast (2s), quote and spot routes all call fetchCandles;
@@ -25,19 +48,20 @@ export async function fetchCandles(symbol: string, exchange: string, interval: s
   const stepMins: Record<string, number> = { "1s": 1/60, "1m": 1, "2m": 2, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "1d": 1440, "1w": 10080, "1mt": 43200 };
   const step = stepMins[interval] || 5;
   const today = new Date();
-  const daysBack = Math.max(1, Math.ceil((step * count * 60 * 1000) / (24 * 60 * 60 * 1000) * 2));
+  const daysBack = daysBackFor(count, step);
   const startDate = new Date(today.getTime() - daysBack * 24 * 60 * 60 * 1000).toISOString();
   const endDate = today.toISOString();
 
   const query = { query: [{ exchange, type: resolveAssetType(symbol), values: [symbol], fields: ["open", "high", "low", "close", "cumulative_volume"], startDate, endDate, interval: brokerInterval, intraDay: false, realTime: false }] };
   let candles: any[] = [];
   try {
-    const data = await nubraApi.getHistoricalData(query);
+    const data = await nb.nubraApi.getHistoricalData(query);
     if (data?.result?.[0]) {
       const symData = data.result[0].values[0][symbol];
       if (symData?.close) {
         const times = symData.close.map((p: any) => p.ts);
-        candles = times.map((ts: number, idx: number) => ({ ts, open: symData.open[idx].v / 100, high: symData.high[idx].v / 100, low: symData.low[idx].v / 100, close: symData.close[idx].v / 100, volume: symData.cumulative_volume[idx].v }));
+        const volume = toPerBarVolume(symData.cumulative_volume.map((p: any) => p.v));
+        candles = times.map((ts: number, idx: number) => ({ ts, open: symData.open[idx].v / 100, high: symData.high[idx].v / 100, low: symData.low[idx].v / 100, close: symData.close[idx].v / 100, volume: volume[idx] }));
       }
     }
   } catch (e: any) {
@@ -50,7 +74,7 @@ export async function fetchCandles(symbol: string, exchange: string, interval: s
 
 export async function fetchOptionSymbol(symbol: string, strike: number, optType: string, exchange = "NSE"): Promise<string | null> {
   try {
-    const chain = await nubraApi.getOptionChain(symbol, undefined, exchange);
+    const chain = await nb.nubraApi.getOptionChain(symbol, undefined, exchange);
     const entries = chain?.chain?.[optType.toLowerCase()];
     if (!entries) return null;
     const arr = Object.values(entries) as any[];

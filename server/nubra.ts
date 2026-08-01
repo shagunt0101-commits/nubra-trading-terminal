@@ -2,7 +2,7 @@ import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import logger from "./logger.js";
-import { daysBackFor, toPerBarVolume } from "./market-data.js";
+import * as md from "./market-data.js";
 
 const NUBRA_ENV = process.env.NUBRA_ENV || "PROD";
 const NUBRA_PHONE = process.env.NUBRA_PHONE || "";
@@ -415,7 +415,7 @@ export async function fetchCandlesInternal(symbol: string, exchange: string, int
   const stepMins: Record<string, number> = { "1s": 1/60, "1m": 1, "2m": 2, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "1d": 1440, "1w": 10080, "1mt": 43200 };
   const step = stepMins[interval] || 5;
   const today = new Date();
-  const daysBack = daysBackFor(count, step);
+  const daysBack = md.daysBackFor(count, step);
   const startDate = new Date(today.getTime() - daysBack * 24 * 60 * 60 * 1000).toISOString();
   const endDate = today.toISOString();
 
@@ -427,7 +427,7 @@ export async function fetchCandlesInternal(symbol: string, exchange: string, int
       const symData = data.result[0].values[0][symbol];
       if (symData?.close) {
         const times = symData.close.map((p: any) => p.ts);
-        const volume = toPerBarVolume(symData.cumulative_volume.map((p: any) => p.v));
+        const volume = md.toPerBarVolume(symData.cumulative_volume.map((p: any) => p.v));
         candles = times.map((ts: number, idx: number) => ({ ts, open: symData.open[idx].v / 100, high: symData.high[idx].v / 100, low: symData.low[idx].v / 100, close: symData.close[idx].v / 100, volume: volume[idx] }));
       }
     }
