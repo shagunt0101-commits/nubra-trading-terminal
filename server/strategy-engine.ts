@@ -1,4 +1,7 @@
-import { Candle, calculateADX, calculateEMA, calculateStochastic, calculateBollingerBands, calculateRSI, calculateSMA, calculateVWAP, calculateVolumeZScore } from "./indicators.js";
+// Namespace import, not named: named-export bindings across a bundled module
+// graph (Vercel serverless esbuild) intermittently break ("does not provide an
+// export named 'calculateStochastic'"). Property access survives any interop.
+import * as ind from "./indicators.js";
 
 export interface StrategySignal {
   direction: "LONG" | "SHORT" | "NONE";
@@ -17,13 +20,13 @@ export const STRATEGY_DEFAULTS = {
 
 // 2. Trend Continuation Strategy
 export function evaluateTrendContinuation(
-  candles: Candle[],
+  candles: ind.Candle[],
   timeframe: "scalping" | "intraday" = "scalping"
 ): StrategySignal {
   const p = timeframe === "scalping" ? 25 : 20;
-  const adxRes = calculateADX(candles, 14);
-  const ema21 = calculateEMA(candles.map(c => c.close), 21);
-  const stoch = calculateStochastic(candles);
+  const adxRes = ind.calculateADX(candles, 14);
+  const ema21 = ind.calculateEMA(candles.map(c => c.close), 21);
+  const stoch = ind.calculateStochastic(candles);
 
   const lastIdx = candles.length - 1;
   if (lastIdx < 1) return { direction: "NONE", confidence: 0 };
@@ -51,9 +54,9 @@ export function evaluateTrendContinuation(
 }
 
 // 3. Bollinger Band Mean Reversal
-export function evaluateBBMeanReversal(candles: Candle[]): StrategySignal {
-  const bb = calculateBollingerBands(candles.map(c => c.close), 20, 2);
-  const rsi = calculateRSI(candles.map(c => c.close), 14);
+export function evaluateBBMeanReversal(candles: ind.Candle[]): StrategySignal {
+  const bb = ind.calculateBollingerBands(candles.map(c => c.close), 20, 2);
+  const rsi = ind.calculateRSI(candles.map(c => c.close), 14);
 
   const lastIdx = candles.length - 1;
   if (lastIdx < 1) return { direction: "NONE", confidence: 0 };
@@ -79,8 +82,8 @@ export function evaluateBBMeanReversal(candles: Candle[]): StrategySignal {
 }
 
 // 4. RSI Reversal Bounce
-export function evaluateRSIReversal(candles: Candle[]): StrategySignal {
-  const rsi = calculateRSI(candles.map(c => c.close), 14);
+export function evaluateRSIReversal(candles: ind.Candle[]): StrategySignal {
+  const rsi = ind.calculateRSI(candles.map(c => c.close), 14);
   const lastIdx = candles.length - 1;
   if (lastIdx < 1) return { direction: "NONE", confidence: 0 };
 
@@ -94,9 +97,9 @@ export function evaluateRSIReversal(candles: Candle[]): StrategySignal {
 }
 
 // 5. SMA/EMA Trend Follow
-export function evaluateTrendFollow(candles: Candle[]): StrategySignal {
-  const sma20 = calculateSMA(candles.map(c => c.close), 20);
-  const ema50 = calculateEMA(candles.map(c => c.close), 50);
+export function evaluateTrendFollow(candles: ind.Candle[]): StrategySignal {
+  const sma20 = ind.calculateSMA(candles.map(c => c.close), 20);
+  const ema50 = ind.calculateEMA(candles.map(c => c.close), 50);
 
   const lastIdx = candles.length - 1;
   if (lastIdx < 2) return { direction: "NONE", confidence: 0 };
@@ -118,22 +121,22 @@ export function evaluateTrendFollow(candles: Candle[]): StrategySignal {
 
 // 6. S2 Scalper Strategy
 export function evaluateS2Scalper(
-  candles: Candle[],
+  candles: ind.Candle[],
   context?: { pcr?: number; iv?: number }
 ): StrategySignal {
-  const rsi = calculateRSI(candles.map(c => c.close), 14);
+  const rsi = ind.calculateRSI(candles.map(c => c.close), 14);
   // MACD (12, 26, 9)
   const macd = (function() {
-    const fastEMA = calculateEMA(candles.map(c => c.close), 12);
-    const slowEMA = calculateEMA(candles.map(c => c.close), 26);
+    const fastEMA = ind.calculateEMA(candles.map(c => c.close), 12);
+    const slowEMA = ind.calculateEMA(candles.map(c => c.close), 26);
     const line = fastEMA.map((f, i) => f - slowEMA[i]);
-    const signal = calculateEMA(line, 9);
+    const signal = ind.calculateEMA(line, 9);
     const hist = line.map((l, i) => l - signal[i]);
     return { line, signal, hist };
   })();
-  const vwap = calculateVWAP(candles);
-  const bb = calculateBollingerBands(candles.map(c => c.close), 20, 2);
-  const volZ = calculateVolumeZScore(candles.map(c => c.volume), 20);
+  const vwap = ind.calculateVWAP(candles);
+  const bb = ind.calculateBollingerBands(candles.map(c => c.close), 20, 2);
+  const volZ = ind.calculateVolumeZScore(candles.map(c => c.volume), 20);
 
   const lastIdx = candles.length - 1;
   if (lastIdx < 1) return { direction: "NONE", confidence: 0 };
