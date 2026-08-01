@@ -102,6 +102,14 @@ const apiLimiter = rateLimit({
 });
 app.use("/api", apiLimiter);
 
+// JSON error handler — Express 4 does not catch async handler rejections; an
+// unhandled one would otherwise surface as an HTML 500 with no body, which
+// frontends can't render. Keep every failure a parseable {error} payload.
+app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  logger.error({ err }, "[API] Unhandled error");
+  res.status(500).json({ success: false, error: err?.message || "Internal server error" });
+});
+
 // Auth middleware — requires valid broker session for trading endpoints
 function requireAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
   const token = getSessionToken();

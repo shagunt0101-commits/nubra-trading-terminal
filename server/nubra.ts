@@ -2,6 +2,7 @@ import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import logger from "./logger.js";
+import { daysBackFor, toPerBarVolume } from "./market-data.js";
 
 const NUBRA_ENV = process.env.NUBRA_ENV || "PROD";
 const NUBRA_PHONE = process.env.NUBRA_PHONE || "";
@@ -39,6 +40,18 @@ export function clearSession() {
   try {
     if (fs.existsSync(SESSION_FILE)) fs.unlinkSync(SESSION_FILE);
   } catch (_) {}
+}
+
+// 20s fetch timeout — Vercel function budget is 30s; a hung Nubra call must
+// fail cleanly (400 with message) instead of burning the budget into a 500.
+async function fetchWithTimeout(url: string, init: RequestInit = {}, ms = 20_000): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // Base32 Decoding helper for TOTP
@@ -123,7 +136,7 @@ async function nubraLoginInner(): Promise<string> {
     logger.info("[Nubra] TOTP generated, logging in");
 
     // Step 1: Login via TOTP to get auth_token
-    const loginRes = await fetch(`${BASE_URL}/totp/login`, {
+    const loginRes = await fetchWithTimeout(`${BASE_URL}/totp/login`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -154,7 +167,7 @@ async function nubraLoginInner(): Promise<string> {
     }
 
     // Step 2: Verify PIN to get session_token
-    const pinRes = await fetch(`${BASE_URL}/verifypin`, {
+    const pinRes = await fetchWithTimeout(`${BASE_URL}/verifypin`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -202,7 +215,7 @@ export async function nubraSendOtp(phone?: string): Promise<{ success: boolean; 
     const p = phone || NUBRA_PHONE;
     if (!p) throw new Error("Phone number required.");
 
-    const res = await fetch(`${BASE_URL}/sendphoneotp`, {
+    const res = await fetchWithTimeout(`${BASE_URL}/sendphoneotp`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -227,7 +240,7 @@ export async function nubraVerifyOtp(otp: string, tempToken: string, phone?: str
     const p = phone || NUBRA_PHONE;
     if (!p) throw new Error("Phone number required.");
 
-    const res = await fetch(`${BASE_URL}/verifyphoneotp`, {
+    const res = await fetchWithTimeout(`${BASE_URL}/verifyphoneotp`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -244,7 +257,7 @@ export async function nubraVerifyOtp(otp: string, tempToken: string, phone?: str
     if (!authToken) return { success: false, error: "Auth token missing from OTP verify response." };
 
     // Step 3: Verify PIN to get session_token (no x-temp-token here)
-    const pinRes = await fetch(`${BASE_URL}/verifypin`, {
+    const pinRes = await fetchWithTimeout(`${BASE_URL}/verifypin`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -306,7 +319,7 @@ async function nubraRequest(endpoint: string, options: RequestInit = {}): Promis
     headers["Authorization"] = `Bearer ${sessionToken}`;
   }
 
-  let res = await fetch(url, { ...options, headers });
+  let res = await fetchWithTimeout(url, { ...options, headers });
 
   // Handle Session Expiry (440) — token is dead, clear it
   if (res.status === 440) {
@@ -401,7 +414,7 @@ export async function fetchCandlesInternal(symbol: string, exchange: string, int
   const stepMins: Record<string, number> = { "1s": 1/60, "1m": 1, "2m": 2, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "1d": 1440, "1w": 10080, "1mt": 43200 };
   const step = stepMins[interval] || 5;
   const today = new Date();
-  const daysBack = Math.max(1, Math.ceil((step * count * 60 * 1000) / (24 * 60 * 60 * 1000) * 2));
+  const daysBack = daysBackFor(count, step);
   const startDate = new Date(today.getTime() - daysBack * 24 * 60 * 60 * 1000).toISOString();
   const endDate = today.toISOString();
 
@@ -413,7 +426,8 @@ export async function fetchCandlesInternal(symbol: string, exchange: string, int
       const symData = data.result[0].values[0][symbol];
       if (symData?.close) {
         const times = symData.close.map((p: any) => p.ts);
-        candles = times.map((ts: number, idx: number) => ({ ts, open: symData.open[idx].v / 100, high: symData.high[idx].v / 100, low: symData.low[idx].v / 100, close: symData.close[idx].v / 100, volume: symData.cumulative_volume[idx].v }));
+        const volume = toPerBarVolume(symData.cumulative_volume.map((p: any) => p.v));
+        candles = times.map((ts: number, idx: number) => ({ ts, open: symData.open[idx].v / 100, high: symData.high[idx].v / 100, low: symData.low[idx].v / 100, close: symData.close[idx].v / 100, volume: volume[idx] }));
       }
     }
   } catch (_) {}
