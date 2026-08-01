@@ -15,7 +15,9 @@ function resolveAssetType(symbol: string): string {
 // * 1.15 (holiday margin). Shared by fetchCandles and fetchCandlesInternal —
 // the old *2 formula over-covered and cut 45d runs to ~18.6 trading days.
 export function daysBackFor(count: number, stepMin: number): number {
-  return Math.max(1, Math.ceil(((stepMin * count * 60) / (6.25 * 3600)) * (7 / 5) * 1.15));
+  // Broker returns 0 candles for a 1-day window (verified 2026-08): the session
+  // mapping needs at least 2 calendar days of history. Floor at 2.
+  return Math.max(2, Math.ceil(((stepMin * count * 60) / (6.25 * 3600)) * (7 / 5) * 1.15));
 }
 
 // Broker returns cumulative_volume (monotone running total) — diff to per-bar
