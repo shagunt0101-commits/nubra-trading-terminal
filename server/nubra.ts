@@ -295,6 +295,7 @@ export function getLoginState() {
     deviceId: NUBRA_DEVICE_ID,
     env: NUBRA_ENV,
     baseUrl: BASE_URL,
+    missingEnv: ["NUBRA_PHONE", "NUBRA_MPIN", "NUBRA_TOTP_SECRET"].filter((k) => !process.env[k]),
   };
 }
 

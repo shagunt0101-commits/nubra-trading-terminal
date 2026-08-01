@@ -24,10 +24,11 @@ export function validateEnv(): void {
   }
 
   if (missing.length > 0) {
+    // Do NOT exit: on Vercel serverless, exit kills the whole function — every
+    // endpoint (health included) turns into FUNCTION_INVOCATION_FAILED and the
+    // real cause is invisible. Log loudly; trading routes are already guarded
+    // by requireAuth, and getLoginState() exposes missingEnv for diagnosis.
     logger.error({ missing }, `Missing required env vars: ${missing.join(", ")}`);
-    if (process.env.NODE_ENV === "production") {
-      process.exit(1);
-    }
   }
 
   if (Object.keys(process.env).length > 0) {
