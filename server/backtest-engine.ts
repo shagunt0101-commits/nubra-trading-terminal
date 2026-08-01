@@ -48,6 +48,10 @@ export interface BTOpts {
 // (0.006 below ATM, damped 0.5x in heldPrem) made a long CE SL unreachable at
 // theta=0 — a money printer that faked the first promotions. Base 0.00385
 // calibrates ATM premium to ~93-100 INR @ NIFTY 24350 (real capture).
+// Index options only: the premium model (spot*0.00385 + 0.6*delta-linear) is
+// calibrated to index IV (11-15%). Stock option IVs (20-40%) make real premiums
+// 2-5x the model — backtests on stocks are garbage (WIPRO avg −38.8%/trade).
+// Stock universe reverted; revisit only with per-stock IV + real bid/ask data.
 const ATM_STEP: Record<string, number> = { NIFTY: 50, BANKNIFTY: 100, FINNIFTY: 50, MIDCPNIFTY: 25, SENSEX: 100 };
 const prem = (spot: number, atm: number, opt: "CE" | "PE") => {
   const d = spot - atm;
