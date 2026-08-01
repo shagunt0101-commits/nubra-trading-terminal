@@ -65,27 +65,20 @@ router.get("/quote/:refId", async (req, res) => {
     let rawPrevClose: number;
     let ohlc: { open: number; high: number; low: number } | undefined;
 
-    const assetType = INDEXES.has(inst.asset.toUpperCase()) ? "INDEX" : "STOCK";
-    if (assetType === "INDEX") {
-      // optionchains/.../price does not serve index spots; use latest candles
-      const candles = await fetchCandles(inst.asset, inst.exchange, "1m", 1);
-      if (!candles || candles.length === 0) throw new Error("No index price from broker");
-      const last = candles[candles.length - 1];
-      rawPrice = last.close * 100;
-      rawPrevClose = inst.prev_close || inst.underlying_prev_close || null;
-      // Day OHLC from 1d candles (last = today, prev = yesterday's close)
-      const dayCandles = await fetchCandles(inst.asset, inst.exchange, "1d", 2);
-      const today = dayCandles[dayCandles.length - 1];
-      if (today) {
-        ohlc = { open: today.open, high: today.high, low: today.low };
-        const yesterday = dayCandles[dayCandles.length - 2];
-        if (yesterday) rawPrevClose = yesterday.close * 100;
-      }
-    } else {
-      const quote = await nubraApi.getCurrentPrice(inst.asset, inst.exchange);
-      rawPrice = quote?.price || quote?.data?.price || quote?.spot;
-      if (!rawPrice) throw new Error("No price from broker");
-      rawPrevClose = quote.prev_close || null;
+    // optionchains/.../price serves only F&O — for both index AND cash-equity
+    // spots use candles (charts/timeseries works for stocks too).
+    const candles = await fetchCandles(inst.asset, inst.exchange, "1m", 1);
+    if (!candles || candles.length === 0) throw new Error("No price from broker");
+    const last = candles[candles.length - 1];
+    rawPrice = last.close * 100;
+    rawPrevClose = inst.prev_close || inst.underlying_prev_close || null;
+    // Day OHLC from 1d candles (last = today, prev = yesterday's close)
+    const dayCandles = await fetchCandles(inst.asset, inst.exchange, "1d", 2);
+    const today = dayCandles[dayCandles.length - 1];
+    if (today) {
+      ohlc = { open: today.open, high: today.high, low: today.low };
+      const yesterday = dayCandles[dayCandles.length - 2];
+      if (yesterday) rawPrevClose = yesterday.close * 100;
     }
 
     const price = rawPrice / 100;
@@ -170,9 +163,10 @@ router.get("/spot/:symbol", async (req, res) => {
     let prevClose: number;
     let ohlc: { open: number; high: number; low: number } | undefined;
 
-    if (INDEXES.has(symbol)) {
+    // Candles work for both index and cash-equity; getCurrentPrice serves only F&O.
+    {
       const candles = await fetchCandles(symbol, exchange, "1m", 1);
-      if (!candles || candles.length === 0) throw new Error("No index price from broker");
+      if (!candles || candles.length === 0) throw new Error("No price from broker");
       const last = candles[candles.length - 1];
       price = last.close;
       const dayCandles = await fetchCandles(symbol, exchange, "1d", 2);
@@ -183,12 +177,6 @@ router.get("/spot/:symbol", async (req, res) => {
       } else {
         prevClose = today ? today.open : price;
       }
-    } else {
-      const quote = await nubraApi.getCurrentPrice(symbol, exchange);
-      const rawPrice = quote?.price || quote?.data?.price || quote?.spot;
-      if (!rawPrice) throw new Error("No price from broker");
-      price = rawPrice / 100;
-      prevClose = (quote.prev_close || rawPrice) / 100;
     }
 
     const pointChange = price - prevClose;
