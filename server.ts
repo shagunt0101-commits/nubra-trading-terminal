@@ -8,6 +8,7 @@ import rateLimit from "express-rate-limit";
 import { WebSocketServer } from "ws";
 import { generateTradingSignals } from "./server/gemini.js";
 import { calculateSMA, calculateEMA, calculateRSI, calculateBollingerBands, calculateMACD, calculateADX } from "./server/indicators.js";
+import { evaluateTrendContinuation, evaluateBBMeanReversal, evaluateRSIReversal, evaluateTrendFollow } from "./server/strategy-engine.js";
 import { getGlobalSentiment } from "./server/global.js";
 import { nubraApi, nubraLogin, nubraSendOtp, nubraVerifyOtp, getLoginState, getSessionToken } from "./server/nubra.js";
 import { fetchCandles } from "./server/market-data.js";
@@ -190,6 +191,10 @@ function generateMockCandles(symbol: string, length = 100, interval = "5m"): any
 }
 
 // REST API Endpoints
+app.get("/api/health", (_req, res) => {
+  res.json({ ok: true, env: process.env.NODE_ENV, vercel: !!process.env.VERCEL });
+});
+
 app.get("/api/auth/status", (req, res) => {
   res.json(getLoginState());
 });
@@ -534,7 +539,8 @@ app.post("/api/backtest", async (req, res) => {
     stopLossPercent = 1.5, targetPercent = 3, exchange = "NSE",
     confidenceThreshold = 55, premiumTargetPct = 30, stopLossPct = 15,
     // Option RSI MR specific params
-    optionRsiThreshold = 40, optionRsiPeriod = 14, maxEntryPremium = 200, premiumTargetPoints = 4
+    optionRsiThreshold = 40, optionRsiPeriod = 14, maxEntryPremium = 200, premiumTargetPoints = 4,
+    premiumStopLossPct = 50
   } = req.body;
   try {
     let candles = await fetchCandles(symbol, exchange, interval, length);
@@ -554,10 +560,11 @@ app.post("/api/backtest", async (req, res) => {
     let balance = 100000;
     const initialBalance = balance;
 
-    // For option_rsi_mr: fetch real CE/PE OHLC for ATM strike
+    // For option_rsi_mr + new strategies: fetch real CE/PE OHLC for ATM strike
     let ceOptCandles: any[] = [];
     let peOptCandles: any[] = [];
-    if (strategy === "option_rsi_mr") {
+    if (strategy === "option_rsi_mr" || strategy === "trend_continuation" || strategy === "bb_mean_reversion" ||
+        strategy === "rsi_reversal" || strategy === "sma_ema_trend") {
       try {
         const medianSpot = closes.slice(20).reduce((a: number, b: number) => a + b, 0) / Math.max(1, closes.length - 20);
         const strike = Math.round(medianSpot / 50) * 50;
@@ -670,7 +677,16 @@ app.post("/api/backtest", async (req, res) => {
       let triggerSignal = false;
       let side: "BUY" | "SELL" = "BUY";
 
-      if (strategy === "sma_ema_cross") {
+      if (strategy === "trend_continuation" || strategy === "bb_mean_reversion" ||
+          strategy === "rsi_reversal" || strategy === "sma_ema_trend") {
+        const slice = candles.slice(0, i + 1);
+        const res = strategy === "trend_continuation" ? evaluateTrendContinuation(slice as any, "scalping")
+          : strategy === "bb_mean_reversion" ? evaluateBBMeanReversal(slice as any)
+          : strategy === "rsi_reversal" ? evaluateRSIReversal(slice as any)
+          : evaluateTrendFollow(slice as any);
+        if (res.direction === "LONG") { triggerSignal = true; side = "BUY"; }
+        else if (res.direction === "SHORT") { triggerSignal = true; side = "SELL"; }
+      } else if (strategy === "sma_ema_cross") {
         if (closes[i] > sma20[i] && closes[i - 1] <= sma20[i - 1] && ema50[i] > ema50[i - 1]) {
           triggerSignal = true; side = "BUY";
         } else if (closes[i] < sma20[i] && closes[i - 1] >= sma20[i - 1] && ema50[i] < ema50[i - 1]) {
@@ -807,16 +823,44 @@ app.post("/api/backtest", async (req, res) => {
       }
 
       if (triggerSignal) {
-        const qty = Math.max(1, Math.floor(balance / candle.close));
-        if (qty > 0) {
-          currentPosition = {
-            id: trades.length + 1,
-            symbol,
-            side,
-            entryTime: Math.round(candle.ts / 1000000),
-            entryPrice: candle.close,
-            qty,
+        if (strategy === "trend_continuation" || strategy === "bb_mean_reversion" ||
+            strategy === "rsi_reversal" || strategy === "sma_ema_trend") {
+          // Premium-style position: exit on option SL/TP, matching live scalper behavior
+          const atm = Math.round(candle.close / 50) * 50;
+          const ceUsed = ceOptCandles.length > i;
+          const peUsed = peOptCandles.length > i;
+          const getPrem = (idx: number, opt: string) => {
+            if (opt === "CE" && ceUsed && ceOptCandles[idx]?.close > 0) return ceOptCandles[idx].close;
+            if (opt === "PE" && peUsed && peOptCandles[idx]?.close > 0) return peOptCandles[idx].close;
+            const c = candles[idx].close;
+            return opt === "CE" ? c * 0.006 + Math.max(0, (c - atm) * 0.4) : c * 0.005 + Math.max(0, (atm - c) * 0.4);
           };
+          const entryPremium = getPrem(i, side === "BUY" ? "CE" : "PE");
+          if (entryPremium > 0) {
+            const slPct = premiumStopLossPct || 50;
+            const slPts = premiumTargetPoints || 4;
+            currentPosition = {
+              id: trades.length + 1, symbol, side,
+              entryTime: Math.round(candle.ts / 1000000),
+              entryPrice: candle.close, entryPremium,
+              optType: side === "BUY" ? "CE" : "PE", strike: atm,
+              stopLoss: Math.round(entryPremium * (1 - slPct / 100) * 100) / 100,
+              target: Math.round((entryPremium + slPts) * 100) / 100,
+              qty: 1, status: "OPEN", maxPriceSeen: entryPremium, phase1TargetHit: false,
+            };
+          }
+        } else {
+          const qty = Math.max(1, Math.floor(balance / candle.close));
+          if (qty > 0) {
+            currentPosition = {
+              id: trades.length + 1,
+              symbol,
+              side,
+              entryTime: Math.round(candle.ts / 1000000),
+              entryPrice: candle.close,
+              qty,
+            };
+          }
         }
       }
     } // for loop
