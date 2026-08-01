@@ -34,9 +34,19 @@ export default function AiAnalysis({
 
   const [strategy, setStrategy] = useState<"scalping" | "day_trading" | "swing_trading" | "btst" | "stbt">("day_trading");
   const [report, setReport] = useState<string>("");
+  const [reportTs, setReportTs] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
   const [viewMode, setViewMode] = useState<"structured" | "markdown">("markdown");
+
+  // Per-symbol report cache (localStorage) — survives reloads; new reports only on click
+  const CACHE_KEY = "ai-report-cache-v1";
+  const [reportCache, setReportCache] = useState<Record<string, { report: string; ts: number }>>(() => {
+    try { return JSON.parse(localStorage.getItem(CACHE_KEY) || "{}"); } catch { return {}; }
+  });
+  React.useEffect(() => {
+    try { localStorage.setItem(CACHE_KEY, JSON.stringify(reportCache)); } catch {}
+  }, [reportCache]);
 
   // Custom AI Provider Configuration (session-only, never persisted to localStorage)
   const [aiProvider, setAiProvider] = useState<"gemini" | "custom">("custom");
@@ -135,6 +145,9 @@ export default function AiAnalysis({
 
       const data = await res.json();
       setReport(data.report);
+      setReportTs(Date.now());
+      // Cache per symbol+strategy — shown again when revisiting, no re-fetch
+      setReportCache((c) => ({ ...c, [`${instrument.stock_name}|${strategy}`]: { report: data.report, ts: Date.now() } }));
     } catch (err: any) {
       setError(err.message || "Failed to generate AI signals.");
     } finally {
@@ -142,15 +155,19 @@ export default function AiAnalysis({
     }
   };
 
-  // Auto-trigger analysis when instrument or option chain changes to provide instant "deep insight"
+  // Show cached report when instrument or strategy changes — generate only on click
   React.useEffect(() => {
-    if (instrument && chartData.length > 0) {
-      if (tradingMode === "FNO" && !optionChain) {
-        return; // Wait for option chain data to arrive to do a deep analysis
-      }
-      handleGenerate();
+    const cached = reportCache[`${instrument?.stock_name}|${strategy}`];
+    if (cached) {
+      setReport(cached.report);
+      setReportTs(cached.ts);
+    } else {
+      setReport("");
+      setReportTs(0);
     }
-  }, [instrument?.ref_id, optionChain?.asset, tradingMode, strategy]);
+    setError("");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [instrument?.stock_name, strategy]);
 
   // Parses parameters from markdown to support the one-click order filler
   const handleAutoFill = () => {
@@ -375,6 +392,11 @@ export default function AiAnalysis({
               <div className="flex items-center gap-1.5 text-xs font-mono text-gray-400 px-2">
                 <Cpu className="h-3.5 w-3.5 text-brand-green" />
                 <span>AI Advisory Report</span>
+                {reportTs > 0 && (
+                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-white/5 border border-white/10 text-gray-500 font-mono">
+                    cached {new Date(reportTs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                  </span>
+                )}
               </div>
               <div className="flex items-center gap-1">
                 <button
