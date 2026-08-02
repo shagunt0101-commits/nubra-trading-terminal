@@ -100,7 +100,10 @@ Market Context:
 Analyze this data and return the professional screening & signaling report with dedicated ATM CE and PE breakdown for ${marketContext.symbol}.
   `;
 
-  // Custom AI Provider Flow
+  // Custom AI Provider Flow — wrapped so an unreachable/dead custom endpoint
+  // (e.g. a stale tunnel) degrades to the Gemini fallback below instead of a
+  // hard 500. Config errors that the operator should fix (no key at all, bad
+  // URL scheme) still throw.
   if (marketContext.aiProvider === "custom") {
     // Security: a key from the client may only be used against a URL the client
     // also supplied (it is the client's own key). The env key (operator secret)
@@ -188,11 +191,19 @@ Analyze this data and return the professional screening & signaling report with 
       }
       return text;
     } catch (err: any) {
-      logger.error({ err }, "Custom AI provider analysis failed");
-      // A failure must NOT look like a successful report: the route responds
-      // 500, the client surfaces the error and skips the cache. Returning a
-      // markdown here made the HTTP layer 200 it and cache the error text.
-      throw new Error(`Custom AI Endpoint failed: ${err.message}`);
+      logger.error({ err }, "Custom AI provider analysis failed — falling back to Gemini");
+      // The custom endpoint failed (dead tunnel, provider outage, bad key):
+      // fall through to the Gemini flow below instead of a hard 500. Only
+      // operator config errors were meant to throw, and those threw already.
+      const backup = marketContext.aiProvider;
+      marketContext.aiProvider = "gemini";
+      const report = await generateTradingSignals(marketContext);
+      marketContext.aiProvider = backup;
+      if (report.startsWith("### AI Analysis Error")) {
+        // Gemini also failed — surface the custom endpoint's original error.
+        throw new Error(`Custom AI Endpoint failed: ${err.message}`);
+      }
+      return report;
     }
   }
 
