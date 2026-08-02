@@ -174,7 +174,7 @@ export default function PanelWrapper({
       )}
 
       <div
-        className="flex-1 min-h-0 overflow-hidden"
+        className="flex-1 min-h-0 overflow-hidden glass-base/30"
         style={{ width: isMaximized ? "100%" : undefined }}
       >
         {children}
