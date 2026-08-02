@@ -117,7 +117,9 @@ export default function ScalperDashboard({ quotes, premium, fnoInstruments }: { 
   const [loading, setLoading] = useState(true);
   const [showConfig, setShowConfig] = useState(false);
   const [showLogs, setShowLogs] = useState(false);
+  const [showConsole, setShowConsole] = useState(false);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [actionError, setActionError] = useState("");
   const [editConfig, setEditConfig] = useState<Record<string, string>>({});
   const [saveMsg, setSaveMsg] = useState("");
   const logsContainerRef = useRef<HTMLDivElement>(null);
@@ -136,7 +138,7 @@ export default function ScalperDashboard({ quotes, premium, fnoInstruments }: { 
     if (showLogs && logsContainerRef.current) {
       logsContainerRef.current.scrollTop = logsContainerRef.current.scrollHeight;
     }
-  }, [status?.logs, showLogs]);
+  }, [status?.logs, showLogs, showConsole]);
 
   // Poll live status while running
   useEffect(() => {
@@ -148,14 +150,21 @@ export default function ScalperDashboard({ quotes, premium, fnoInstruments }: { 
 
   const doAction = async (action: string, body?: Record<string, unknown>) => {
     setActionLoading(action);
+    setActionError("");
     try {
-      await fetch(`/api/scalper/${action}`, {
+      const res = await fetch(`/api/scalper/${action}`, {
         method: action === "status" ? "GET" : "POST",
         headers: { "Content-Type": "application/json" },
         body: body ? JSON.stringify(body) : undefined,
       });
+      if (!res.ok) {
+        const txt = await res.text();
+        setActionError(`${action}: ${txt ? txt.slice(0, 140) : `HTTP ${res.status}`}`);
+      }
       await fetchStatus();
-    } catch (_) {}
+    } catch (err: unknown) {
+      setActionError(`action failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
     setActionLoading(null);
   };
 
@@ -481,10 +490,12 @@ export default function ScalperDashboard({ quotes, premium, fnoInstruments }: { 
 
       {/* Console logs */}
       <div className="border-t border-slate-800">
-        <button onClick={() => setShowLogs(!showLogs)} // using separate state for console
+        <button onClick={() => setShowConsole(!showConsole)}
           className="flex items-center gap-1 w-full px-3 py-1.5 text-[9px] font-mono text-slate-500 hover:text-slate-300 cursor-pointer">
-          <Activity className="h-3 w-3" /> Console ({s.logs.length})
+          <Activity className="h-3 w-3 mt-[2px]" /> Console ({s.logs.length})
+          {showConsole ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
         </button>
+        {showConsole && (
         <div className="max-h-[120px] overflow-y-auto px-3 pb-3 space-y-0.5">
           {[...s.logs].reverse().slice(0, 30).map((l, i) => {
             const t = new Date(l.ts).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata" });
@@ -503,7 +514,15 @@ export default function ScalperDashboard({ quotes, premium, fnoInstruments }: { 
             );
           })}
         </div>
+        )}
       </div>
+
+      {/* Action error banner */}
+      {actionError && (
+        <div className="mx-3 mb-2 px-2 py-1 rounded border border-red-500/30 bg-red-500/10 text-red-400 text-[9px] font-mono">
+          {actionError}
+        </div>
+      )}
     </div>
   );
 }

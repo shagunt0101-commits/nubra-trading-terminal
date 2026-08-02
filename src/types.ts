@@ -223,6 +223,12 @@ export interface BacktestResult {
     pnl: number;
     pnlPercent: number;
     result: "WIN" | "LOSS";
+    // premium-engine fields (s2_scalper + option strategies)
+    optType?: "CE" | "PE";
+    strike?: number;
+    entryPremium?: number;
+    exitPremium?: number;
+    exitReason?: string;
   }>;
 }
 

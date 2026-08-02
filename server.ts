@@ -12,6 +12,7 @@ import { evaluateTrendContinuation, evaluateBBMeanReversal, evaluateRSIReversal,
 import { getGlobalSentiment } from "./server/global.js";
 import { nubraApi, nubraLogin, nubraSendOtp, nubraVerifyOtp, getLoginState, getSessionToken } from "./server/nubra.js";
 import { fetchCandles } from "./server/market-data.js";
+import { runBacktest, PREMIUM_STRATEGIES } from "./server/backtest-engine.js";
 import { scalper } from "./server/scalper-instance.js";
 import logger from "./server/logger.js";
 import { validateEnv } from "./server/env.js";
@@ -507,9 +508,21 @@ app.get("/api/portfolio/summary", async (req, res) => {
 // Native intervals supported by Nubra
 const BROKER_INTERVALS = new Set(["1s","1m","2m","3m","5m","15m","30m","1h","1d","1w","1mt"]);
 
+// Shared backtest/historical payload guard — trust boundary. No depth, no
+// nonsense symbol/interval/length slips through to the broker query.
+function validateSeriesPayload(body: any): string | null {
+  const { symbol, interval, length } = body || {};
+  if (!symbol || typeof symbol !== "string") return "symbol is required (string)";
+  if (!BROKER_INTERVALS.has(interval)) return `interval must be one of ${[...BROKER_INTERVALS].join(",")}`;
+  if (length != null && (typeof length !== "number" || length < 10 || length > 5000)) return "length must be a number 10..5000";
+  return null;
+}
+
 // Technical timeseries charts & screening calculations
 app.post("/api/market/historical", async (req, res) => {
   const { symbol, interval, length = 150, exchange = "NSE" } = req.body;
+  const invalid = validateSeriesPayload(req.body);
+  if (invalid) return res.status(400).json({ error: invalid });
   try {
     let candles = await fetchCandles(symbol, exchange, interval, length);
 
@@ -550,12 +563,55 @@ app.post("/api/backtest", async (req, res) => {
     optionRsiThreshold = 40, optionRsiPeriod = 14, maxEntryPremium = 200, premiumTargetPoints = 4,
     premiumStopLossPct = 50
   } = req.body;
+  const invalid = validateSeriesPayload(req.body);
+  if (invalid) return res.status(400).json({ error: invalid });
+  if (typeof strategy !== "string" || !strategy) return res.status(400).json({ error: "strategy is required" });
   try {
     let candles = await fetchCandles(symbol, exchange, interval, length);
     if (candles.length === 0) {
       return res.status(500).json({ error: "No data available for backtest." });
     }
 
+    // Premium strategies route through the honest premium-model engine
+    // (server/backtest-engine.ts) — the same engine PGHO optimized: fixed ATM
+    // strike, premium entry/exit, % SL/TP, theta decay, phase trail. The legacy
+    // spot-% loop below only handles setup strategies.
+    if (PREMIUM_STRATEGIES.has(strategy)) {
+      // Broker ts is nanoseconds (per-engine compat: engine math is spread/median
+      // on deltas so ns is internally consistent, but trade times must be ms for
+      // the UI clock). Normalize once, engine sees clean ms series.
+      candles = candles.map((c: any) => ({ ...c, ts: c.ts > 1e16 ? Math.round(c.ts / 1e6) : c.ts }));
+      const bt = runBacktest(candles as any, {
+        strategy, instrument: symbol,
+        spotSLPct: stopLossPercent, spotTPPct: targetPercent, confidenceThreshold,
+        optionRsiThreshold, optionRsiPeriod, maxEntryPremium,
+        premiumTargetPct, premiumStopLossPct,
+        premiumTargetPoints,
+        exitMode: req.body.exitMode || "phase",
+        maxHoldBars: req.body.maxHoldBars,
+      });
+      res.json({
+        summary: {
+          initialBalance: 100000,
+          finalBalance: 100000 + bt.summary.totalPnlPct,
+          totalPnl: Math.round(bt.summary.totalPnlPct * 100) / 100,
+          returnPercent: Math.round(bt.summary.totalPnlPct * 100) / 100,
+          totalTrades: bt.summary.totalTrades,
+          winRate: Math.round(bt.summary.winRate * 100) / 100,
+          winningTrades: bt.trades.filter((t) => t.result === "WIN").length,
+          losingTrades: bt.trades.length - bt.trades.filter((t) => t.result === "WIN").length,
+          profitFactor: Math.round(bt.summary.profitFactor * 100) / 100,
+        },
+        trades: bt.trades.map((t) => ({
+          ...t,
+          symbol, qty: 1,
+          pnlPercent: Math.round(t.pnlPct * 100) / 100,
+        })),
+      });
+      return;
+    }
+
+    console.log(`[Backtest] legacy spot-% path: ${strategy}`);
     const closes = candles.map((c: any) => c.close);
 
     const sma20 = calculateSMA(closes, 20);

@@ -9,3 +9,6 @@ coverage/
 !.env.example
 .scalper-state.json
 *.swp
+server/scalper-state.json
+sweep-results.*
+optimize-results.json

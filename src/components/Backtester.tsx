@@ -65,6 +65,9 @@ export default function Backtester({ selectedInstrument, selectedInterval, onInt
           interval: selectedInterval,
           stopLossPercent: strategy === "s2_scalper" ? sl : stopLoss,
           targetPercent: strategy === "s2_scalper" ? pt : target,
+          // premium-strategies exit knobs (engine reads these; spot %s are ignored on premium paths)
+          premiumStopLossPct: strategy === "s2_scalper" ? sl : undefined,
+          premiumTargetPct: strategy === "s2_scalper" ? pt : undefined,
           confidenceThreshold: strategy === "s2_scalper" ? ct : undefined,
           length,
           // Option RSI MR params
@@ -127,6 +130,10 @@ export default function Backtester({ selectedInstrument, selectedInterval, onInt
               <option value="bollinger_band_reversal">Bollinger Bands Mean Reversal</option>
               <option value="s2_scalper">S2 Scalper (RSI+MACD+VWAP+BB)</option>
               <option value="option_rsi_mr">Option RSI Mean Revert</option>
+              <option value="trend_continuation">Trend Continuation (ADX+Stoch)</option>
+              <option value="bb_mean_reversion">BB Mean Reversion (new)</option>
+              <option value="rsi_reversal">RSI Reversal (new)</option>
+              <option value="sma_ema_trend">SMA/EMA Trend (new)</option>
             </select>
 
             <button
@@ -284,6 +291,7 @@ export default function Backtester({ selectedInstrument, selectedInterval, onInt
                     <th className="p-2.5">Exit Price</th>
                     <th className="p-2.5">Qty</th>
                     <th className="p-2.5 text-right">Outcome</th>
+                    <th className="p-2.5 hidden lg:table-cell">Exit Reason</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-brand-border/40">
@@ -311,6 +319,7 @@ export default function Backtester({ selectedInstrument, selectedInterval, onInt
                         <td className={`p-2.5 text-right font-bold font-mono ${tr.result === "WIN" ? "text-brand-green" : "text-brand-red"}`}>
                           {tr.pnl >= 0 ? "+" : ""}₹{tr.pnl.toLocaleString("en-IN")} ({tr.pnlPercent}%)
                         </td>
+                        <td className="p-2.5 font-mono hidden lg:table-cell">{tr.exitReason || "-"}</td>
                       </tr>
                     );
                   })}

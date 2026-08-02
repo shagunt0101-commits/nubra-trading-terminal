@@ -1155,26 +1155,27 @@ export class AutoScalper {
     // RSI ≥ 70 exit (Phase 3) — use real option OHLC if available
     if (closes.length >= 15) {
       const period = this.config.optionRsiPeriod || 14;
-      const atm = Math.round(spot / 50) * 50;
-      const step = 50;
-      const offset = this.config.strikeOffset || 0;
-      const ceStrike = atm + step * offset;
-      const peStrike = atm - step * offset;
+      // Exit must match the INSTRUMENT the trade actually holds: resolve the
+      // strike at entry (trade.strike), not the live ATM that drifts with spot.
+      // A per-bar moving strike recomputes RSI on a different contract than the
+      // one entered — a stale-SL artifact that exits winners early.
+      const strike = trade.strike || (Math.round(spot / 50) * 50);
 
       // Try to fetch real option candles for the trade's optType
       let optCandles: any[] = [];
       try {
-        const optSym = await fetchOptionSymbol(this.config.symbol, trade.optType === "CE" ? ceStrike : peStrike, trade.optType, this.config.exchange);
+        const optSym = await fetchOptionSymbol(this.config.symbol, strike, trade.optType, this.config.exchange);
         if (optSym) optCandles = await fetchCandlesInternal(optSym, this.config.exchange, "1m", closes.length);
       } catch (e: any) { logger.warn({ err: e }, "[Scalper] Option candle fetch in checkExit failed"); }
 
       const optUsed = optCandles.length >= period + 1;
 
       // Build premium series from real option candles or synthetic fallback
+      // (synthetic anchored at the held strike, mirroring engine prem() shape)
       const premSeries = closes.map((c, i) => {
         const synthetic = trade.optType === "CE"
-          ? c * 0.006 + Math.max(0, (c - atm) * 0.4)
-          : c * 0.005 + Math.max(0, (atm - c) * 0.4);
+          ? c * 0.00385 + Math.max(0, (c - strike) * 0.6)
+          : c * 0.00385 - Math.max(0, (strike - c) * 0.6);
         return optUsed && optCandles[i]?.close > 0 ? optCandles[i].close : synthetic;
       });
       // Override last with real premium

@@ -166,3 +166,71 @@ export function calculateADX(candles: Candle[], period = 14): AdxResult {
 
   return { adx: calculateEMA(dx, period), plusDi: pDi, minusDi: mDi, atr: str };
 }
+
+export function calculateATR(candles: Candle[], period = 14): number[] {
+  const tr = candles.map((x, i) =>
+    i === 0 ? x.high - x.low : Math.max(x.high - x.low, Math.abs(x.high - candles[i - 1].close), Math.abs(x.low - candles[i - 1].close))
+  );
+  return calculateEMA(tr, period);
+}
+
+
+export interface StochasticResult {
+  k: number[];
+  d: number[];
+}
+
+export function calculateStochastic(candles: Candle[], kPeriod = 14, dPeriod = 3, slowing = 3): StochasticResult {
+  const k: number[] = [];
+  const closes = candles.map(c => c.close);
+  const highs = candles.map(c => c.high);
+  const lows = candles.map(c => c.low);
+
+  for (let i = 0; i < candles.length; i++) {
+    if (i < kPeriod - 1) {
+      k.push(50);
+    } else {
+      const highMax = Math.max(...highs.slice(i - kPeriod + 1, i + 1));
+      const lowMin = Math.min(...lows.slice(i - kPeriod + 1, i + 1));
+      const diff = highMax - lowMin;
+      k.push(diff > 0 ? ((closes[i] - lowMin) / diff) * 100 : 50);
+    }
+  }
+
+  // Smooth %K to get slowed %K, then smooth that to get %D
+  const slowedK = calculateSMA(k, slowing);
+  const d = calculateSMA(slowedK, dPeriod);
+
+  return { k: slowedK, d };
+}
+
+export function calculateVWAP(candles: Candle[]): number[] {
+  let cumulativePv = 0;
+  let cumulativeVolume = 0;
+  const vwap: number[] = [];
+
+  for (const c of candles) {
+    const typicalPrice = (c.high + c.low + c.close) / 3;
+    cumulativePv += typicalPrice * c.volume;
+    cumulativeVolume += c.volume;
+    vwap.push(cumulativeVolume > 0 ? cumulativePv / cumulativeVolume : c.close);
+  }
+
+  return vwap;
+}
+
+export function calculateVolumeZScore(volumes: number[], period = 20): number[] {
+  const zScores: number[] = [];
+  for (let i = 0; i < volumes.length; i++) {
+    if (i < period - 1) {
+      zScores.push(0);
+    } else {
+      const slice = volumes.slice(i - period + 1, i + 1);
+      const mean = slice.reduce((a, b) => a + b, 0) / period;
+      const variance = slice.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / period;
+      const stdDev = Math.sqrt(variance);
+      zScores.push(stdDev > 0 ? (volumes[i] - mean) / stdDev : 0);
+    }
+  }
+  return zScores;
+}

@@ -4,6 +4,7 @@ import { nubraApi } from "../nubra.js";
 import { validate, backtestSchema } from "../validation.js";
 import { fetchCandles, fetchOptionCandles } from "../market-data.js";
 import { calculateSMA, calculateEMA, calculateRSI, calculateBollingerBands, calculateMACD } from "../indicators.js";
+import { evaluateTrendContinuation, evaluateBBMeanReversal, evaluateRSIReversal, evaluateTrendFollow } from "../strategy-engine.js";
 
 const router = Router();
 
@@ -115,7 +116,16 @@ router.post("/", validate(backtestSchema), async (req, res) => {
       let triggerSignal = false;
       let side: "BUY" | "SELL" = "BUY";
 
-      if (strategy === "sma_ema_cross") {
+      if (strategy === "trend_continuation" || strategy === "bb_mean_reversion" ||
+          strategy === "rsi_reversal" || strategy === "sma_ema_trend") {
+        const slice = candles.slice(0, i + 1);
+        const res = strategy === "trend_continuation" ? evaluateTrendContinuation(slice, "scalping")
+          : strategy === "bb_mean_reversion" ? evaluateBBMeanReversal(slice)
+          : strategy === "rsi_reversal" ? evaluateRSIReversal(slice)
+          : evaluateTrendFollow(slice);
+        if (res.direction === "LONG") { triggerSignal = true; side = "BUY"; }
+        else if (res.direction === "SHORT") { triggerSignal = true; side = "SELL"; }
+      } else if (strategy === "sma_ema_cross") {
         if (closes[i] > sma20[i] && closes[i - 1] <= sma20[i - 1] && ema50[i] > ema50[i - 1]) {
           triggerSignal = true; side = "BUY";
         } else if (closes[i] < sma20[i] && closes[i - 1] >= sma20[i - 1] && ema50[i] < ema50[i - 1]) {

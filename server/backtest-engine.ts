@@ -229,7 +229,7 @@ function signalAt(
 // buys CE/PE at LTP, exits on premium points/% target). The backtest must price the
 // same trade: premium entries with premium exits + premium cost class. Spot-% modeling
 // of a premium trade is a different instrument — it invalidated the first optimizer run.
-const PREMIUM_STRATEGIES = new Set(["option_rsi_mr", "s2_scalper", "sma_ema_cross", "rsi_overbought_oversold", "bollinger_band_reversal", "trend_continuation", "bb_mean_reversion", "rsi_reversal", "sma_ema_trend"]);
+export const PREMIUM_STRATEGIES = new Set(["option_rsi_mr", "s2_scalper", "sma_ema_cross", "rsi_overbought_oversold", "bollinger_band_reversal", "trend_continuation", "bb_mean_reversion", "rsi_reversal", "sma_ema_trend"]);
 
 export function runBacktest(candles: BTCandle[], opts: BTOpts): BTRun {
   const s = opts.strategy;
