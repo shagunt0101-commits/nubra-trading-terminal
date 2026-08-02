@@ -293,6 +293,7 @@ app.get("/api/market/search", (req, res) => {
 
 // In-memory quote cache to prevent concurrent external request floods
 const quoteCache = new Map<string, { data: any; timestamp: number }>();
+const spotCache = new Map<string, { data: any; timestamp: number }>();
 
 // Returns detailed current price with technical screening indicators
 app.get("/api/market/quote/:refId", async (req, res) => {
@@ -1168,6 +1169,14 @@ const SPOT_INDEXES = new Set(["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "S
 app.get("/api/market/spot/:symbol", async (req, res) => {
   const symbol = req.params.symbol.toUpperCase();
   const exchange = (req.query.exchange as string) || (symbol === "SENSEX" ? "BSE" : "NSE");
+  // Screener fires ~250 stock spot fetches on mount — the broker rate-limits
+  // parallel bursts (429 for 30s+). Cache 10s, same as quoteCache. Indices
+  // bypass (weekend price != quote; index cache already handled via WS/1d path).
+  if (!SPOT_INDEXES.has(symbol)) {
+    const ck = `${symbol}_${exchange}`;
+    const cached = spotCache.get(ck);
+    if (cached && Date.now() - cached.timestamp < 10000) return res.json(cached.data);
+  }
   try {
     let price: number;
     let prevClose: number;
@@ -1175,12 +1184,13 @@ app.get("/api/market/spot/:symbol", async (req, res) => {
     let ema9 = 0;
     let adx3m = 0;
     let adx5m = 0;
+    let analyticsSource = "intraday";
 
     if (SPOT_INDEXES.has(symbol)) {
       // optionchains/.../price does not serve index spots — use latest candles
       const [candles, dayCandles] = await Promise.all([
         fetchCandles(symbol, exchange, "1m", 1).catch(() => []),
-        fetchCandles(symbol, exchange, "1d", 2).catch(() => []),
+        fetchCandles(symbol, exchange, "1d", 20).catch(() => []),
       ]);
       // Weekend/holiday/pre-open: no 1m candle — fall back to last 1d close
       const last = candles?.[candles.length - 1] ?? dayCandles?.[dayCandles.length - 1];
@@ -1208,6 +1218,16 @@ app.get("/api/market/spot/:symbol", async (req, res) => {
         const adxRes5 = calculateADX(c5, 14);
         adx5m = adxRes5.adx[adxRes5.adx.length - 1] || 0;
       }
+      // Weekend/holiday: 3m/5m empty → recompute EMA9 + ADX from 1d closes
+      // (last close is the reading per the user's expectation, not 0).
+      if (c3.length === 0 && dayCandles.length >= 10) {
+        analyticsSource = "1d";
+        const dayCloses = dayCandles.map((c: any) => c.close);
+        ema9 = calculateEMA(dayCloses, 9)[dayCloses.length - 1];
+        const adxRes = calculateADX(dayCandles, 14);
+        adx3m = adxRes.adx[adxRes.adx.length - 1] || 0;
+        adx5m = adx3m;
+      }
     } else {
       const quote = await nubraApi.getCurrentPrice(symbol, exchange);
       const rawPrice = quote?.price || quote?.data?.price || quote?.spot;
@@ -1218,11 +1238,13 @@ app.get("/api/market/spot/:symbol", async (req, res) => {
 
     const pointChange = price - prevClose;
     const changePct = prevClose > 0 ? (pointChange / prevClose) * 100 : 0;
-    return res.json({
+    const payload = {
       symbol, price, prevClose, pointChange, changePct, exchange, source: "broker",
       open: ohlc?.open ?? price, high: ohlc?.high ?? price, low: ohlc?.low ?? price,
-      ema9: ema9 || price, adx3m, adx5m,
-    });
+      ema9: ema9 || price, adx3m, adx5m, analyticsSource,
+    };
+    if (!SPOT_INDEXES.has(symbol)) spotCache.set(`${symbol}_${exchange}`, { data: payload, timestamp: Date.now() });
+    return res.json(payload);
   } catch (err: any) { logger.warn({ err: err.message, symbol }, "[Spot Price] Broker API failed"); }
   res.status(404).json({ error: "Symbol not found — broker returned no data." });
 });

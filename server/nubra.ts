@@ -113,14 +113,22 @@ export function generateTOTP(secret: string): string {
 }
 
 let loginInFlight: Promise<string> | null = null;
+// Cooldown after a failed login: the broker rate-limits /totp/login, so every
+// subsequent request must NOT re-hammer it — wait, then allow ONE retry. The
+// old sessionToken stays usable meanwhile (most 404/401 waves were this storm).
+let loginCooldownUntil = 0;
+export function loginRetryCooldownMs() {
+  return Math.max(0, loginCooldownUntil - Date.now());
+}
 
 // Performs step-by-step automated login using TOTP and Pin
 // Single-flight: concurrent first requests (App fires 4 parallel fetches at
 // mount) would each trigger a duplicate TOTP login and stall the boot path.
 export function nubraLogin(): Promise<string> {
-  if (!loginInFlight) {
-    loginInFlight = nubraLoginInner().finally(() => { loginInFlight = null; });
-  }
+  if (loginInFlight) return loginInFlight;
+  loginInFlight = nubraLoginInner().finally(() => {
+    loginInFlight = null;
+  });
   return loginInFlight;
 }
 
@@ -204,6 +212,7 @@ async function nubraLoginInner(): Promise<string> {
   } catch (err: any) {
     loginError = err.message;
     loginStatus = "FAILED";
+    loginCooldownUntil = Date.now() + 60_000;
     logger.error({ err }, "[Nubra] Login error");
     return "";
   }
@@ -301,8 +310,10 @@ export function getLoginState() {
 
 // Generic Fetch Wrapper that injects Authorization headers — auto-login via TOTP if no session
 async function nubraRequest(endpoint: string, options: RequestInit = {}): Promise<any> {
-  if (!sessionToken || loginStatus === "FAILED") {
-    // Auto-login with TOTP if credentials are configured
+  if (!sessionToken || (loginStatus === "FAILED" && Date.now() >= loginCooldownUntil)) {
+    // Auto-login with TOTP if credentials are configured. During the cooldown
+    // window the old (probably still valid) token is reused — the storm was
+    // making everything worse by re-hammering /totp/login every request.
     const token = await nubraLogin();
     if (!token) {
       throw new Error("Not logged in. Use OTP or TOTP login first.");
@@ -333,6 +344,11 @@ async function nubraRequest(endpoint: string, options: RequestInit = {}): Promis
       logger.warn(`[Nubra] Session expired (${res.status}), clearing token & re-login`);
       clearSession();
       sessionToken = "";
+      // Respect the failed-login cooldown here too — an expiry right after a
+      // failed relogin must not immediately retry and re-trigger the storm.
+      if (Date.now() < loginCooldownUntil) {
+        throw new Error(`Session expired (${res.status}). Retry in ${Math.ceil(loginRetryCooldownMs() / 1000)}s.`);
+      }
       const token = await nubraLogin();
       if (!token) {
         throw new Error(`Session expired (${res.status}). Re-login failed: ${loginError}`);

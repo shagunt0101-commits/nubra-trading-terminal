@@ -43,6 +43,8 @@ export default function Screener({
 
   // Filtering based on Active Workspace Mode
   const INDEX_ASSETS = ["NIFTY", "BANKNIFTY", "SENSEX", "MIDCPNIFTY", "FINNIFTY"];
+  // WS broadcasts indices under synthetic refs 1001-1005 (server WS_INDEX_MAP)
+  const WS_INDEX_REFS: Record<string, number> = { NIFTY: 1001, BANKNIFTY: 1002, SENSEX: 1003, MIDCPNIFTY: 1004, FINNIFTY: 1005 };
   const handleSelectFnoAsset = (asset: string) => {
     // Indices should always use virtual instrument (stock-type) to show spot chart, not FUT
     if (!INDEX_ASSETS.includes(asset)) {
@@ -79,36 +81,46 @@ export default function Screener({
       .catch(() => {});
   };
 
-  // On-demand price cache for F&O assets still showing as 0 (fires once per missing asset, not every WS tick)
+  // On-demand price cache for F&O assets still showing as 0. Paced single-flight
+  // queue (2 req/s, 600ms min gap): the broker rate-limits ~3/s sustained —
+  // anything faster 429s every route for 30s+ (verified). Failed fetches stay
+  // unmarked and retry on a later effect run. Queue lives in a ref so state
+  // updates never rebuild/duplicate it.
   const [fallbackPrices, setFallbackPrices] = React.useState<Record<string, number>>({});
   const fetchedRef = React.useRef<Set<string>>(new Set());
+  const queueRef = React.useRef<string[]>([]);
+  const runningRef = React.useRef(false);
+  const lastFetchRef = React.useRef(0);
+  const pumpRef = React.useRef<() => void>(() => {});
+  pumpRef.current = () => {
+    if (runningRef.current) return;
+    runningRef.current = true;
+    const next = () => {
+      if (queueRef.current.length === 0) { runningRef.current = false; return; }
+      const wait = Math.max(0, lastFetchRef.current + 600 - Date.now());
+      setTimeout(() => {
+        const item = queueRef.current.shift()!;
+        lastFetchRef.current = Date.now();
+        fetch(`/api/market/spot/${item}?exchange=NSE`)
+          .then(r => r.ok ? r.json() : null)
+          .then(d => { if (d?.price) setFallbackPrices(p => ({ ...p, [item]: d.price })); })
+          .catch(() => {})
+          .finally(() => { setTimeout(next, 600); });
+      }, wait);
+    };
+    next();
+  };
   React.useEffect(() => {
     if (tradingMode !== "FNO") return;
     for (const item of fnoUnderlyings) {
       if (fetchedRef.current.has(item.asset)) continue;
-      const opt = instruments.find(i => i.asset === item.asset && i.derivative_type === "OPT");
-      if (opt && quotes[opt.ref_id]) continue; // already have live data
+      if (fallbackPrices[item.asset] != null) continue;
+      if (INDEX_ASSETS.includes(item.asset) && quotes[WS_INDEX_REFS[item.asset]]) continue; // index broadcast live
       fetchedRef.current.add(item.asset);
-      // Indices broadcast under synthetic refs; never resolve their fallback
-      // from an option contract's LTP (unit = premium). Use the spot route.
-      if (INDEX_ASSETS.includes(item.asset)) {
-        fetch(`/api/market/spot/${item.asset}?exchange=${item.exchange || 'NSE'}`)
-          .then(r => r.ok ? r.json() : null)
-          .then(d => { if (d?.price) setFallbackPrices(p => ({ ...p, [item.asset]: d.price })); })
-          .catch(() => {});
-      } else if (opt) {
-        fetch(`/api/market/quote/${opt.ref_id}`)
-          .then(r => r.ok ? r.json() : null)
-          .then(d => { if (d?.price) setFallbackPrices(p => ({ ...p, [item.asset]: d.price })); })
-          .catch(() => {});
-      } else {
-        fetch(`/api/market/spot/${item.asset}?exchange=${item.exchange || 'NSE'}`)
-          .then(r => r.ok ? r.json() : null)
-          .then(d => { if (d?.price) setFallbackPrices(p => ({ ...p, [item.asset]: d.price })); })
-          .catch(() => {});
-      }
+      if (!queueRef.current.includes(item.asset)) queueRef.current.push(item.asset);
     }
-  }, [tradingMode]); // only re-run on mode change, not every quotes tick
+    pumpRef.current();
+  }, [tradingMode, instruments, isLoading, fallbackPrices]); // re-run when instruments arrive / fallback completes
 
   if (tradingMode === "FNO") {
     const filteredFno = fnoUnderlyings.filter(item => {
@@ -175,12 +187,10 @@ export default function Screener({
             );
           }) : filteredFno.map((item) => {
             const isSelected = selectedInstrument?.asset === item.asset;
-            // WS broadcasts indices under synthetic refs 1001-1005 (server WS_INDEX_MAP),
-            // never the option-contract refs. Resolve the row price from the index
-            // broadcast first; fall back to the option contract's LTP only when the
-            // asset has no broadcast (real FUT/OPT quotes).
-            const WS_INDEX_REFS: Record<string, number> = { NIFTY: 1001, BANKNIFTY: 1002, SENSEX: 1003, MIDCPNIFTY: 1004, FINNIFTY: 1005 };
             const wsQuote = WS_INDEX_REFS[item.asset] ? (quotes[WS_INDEX_REFS[item.asset]] || null) : null;
+            // FUT/OPT assets use their option contract's LTP (units = premium) only
+            // when it's genuinely the option stream; stocks (no broadcast) resolve
+            // via fallbackPrices fetched from the spot route (units = rupees).
             const optInst = instruments.find((i) => i.asset === item.asset && i.derivative_type === "OPT");
             const optQuote = wsQuote ? null : (optInst ? (quotes[optInst.ref_id] || null) : null);
             const quote = wsQuote || optQuote;
