@@ -88,6 +88,7 @@ export interface ScalperConfig {
   stopLossPct: number;             // e.g. 40 → 40% loss on premium
   maxSpreadPct: number;            // max bid-ask spread % allowed
   strikeOffset: number;            // strikes away from ATM (1 = ATM+1)
+  strikeStep: number;              // strike interval: 50 (NIFTY group) or 100 (BANKNIFTY/SENSEX/CORPORATE)
   consecutiveLossLimit: number;
   minPremiumThreshold: number;
   optionExpiry: string;            // expiry date YYYY-MM-DD or "" for nearest
@@ -186,6 +187,7 @@ const DEFAULT_CONFIG: ScalperConfig = {
   stopLossPct: 20,
   maxSpreadPct: 5,
   strikeOffset: 1,
+  strikeStep: 50,
   consecutiveLossLimit: 3,
   minPremiumThreshold: 0.5,
   optionExpiry: "",
@@ -225,6 +227,7 @@ const INSTRUMENT_DEFAULTS: Record<string, Partial<ScalperConfig>> = {
     lotSize: 35, lotCount: 2, totalQty: 70,
     minPremiumThreshold: 1.0, maxEntryPremium: 900,
     strikeOffset: 1, premiumTargetPoints: 6,
+    strikeStep: 100,
   },
   FINNIFTY: {
     lotSize: 65, lotCount: 2, totalQty: 130,
@@ -240,6 +243,7 @@ const INSTRUMENT_DEFAULTS: Record<string, Partial<ScalperConfig>> = {
     lotSize: 20, lotCount: 2, totalQty: 40,
     minPremiumThreshold: 1.0, maxEntryPremium: 1000,
     strikeOffset: 1, premiumTargetPoints: 6,
+    strikeStep: 100,
   },
 };
 
@@ -594,7 +598,7 @@ export class AutoScalper {
       const totalCallOI = ceList.reduce((a: number, c: any) => a + (c.oi || 0), 0);
       const totalPutOI = peList.reduce((a: number, c: any) => a + (c.oi || 0), 0);
       pcr = totalCallOI > 0 ? totalPutOI / totalCallOI : 1;
-      const atm = Math.round(spot / 50) * 50;
+      const atm = this.atmAround(spot);
       const atmCall = ceList.find((c: any) => Math.round((c.sp || 0) / 100) === atm);
       const atmPut = peList.find((p: any) => Math.round((p.sp || 0) / 100) === atm);
       atmIV = ((atmCall?.iv || 0) + (atmPut?.iv || 0)) / 2;
@@ -615,7 +619,7 @@ export class AutoScalper {
     if (!hasStrongSignal || confidence < this.config.confidenceThreshold || (bullScore + bearScore) < 3) {
       return { timestamp: Date.now(), direction: "NEUTRAL", confidence: 0, reasons: [], rsi: rsiVal,
         macd: macdLine > signalLine ? "Bullish" : "Bearish", vwapAbove, bbWidth, volumeZscore, pcr, ivPercentile,
-        atmStrike: Math.round(spot / 50) * 50, targetStrike: 0, premium: 0, spot, optType: "CE" };
+        atmStrike: this.atmAround(spot), targetStrike: 0, premium: 0, spot, optType: "CE" };
     }
 
     return this.resolveStrikePremium(spot, isBull, confidence, reasons, rsiVal, macdLine > signalLine ? "Bullish" : "Bearish",
@@ -703,8 +707,8 @@ export class AutoScalper {
     const ceList: any[] = (chain.ce || []).filter((c: any) => (c.sp || 0) > 0);
     const peList: any[] = (chain.pe || []).filter((p: any) => (p.sp || 0) > 0);
 
-    const atm = Math.round(spot / 50) * 50;
-    const step = 50;
+    const atm = this.atmAround(spot);
+    const step = this.config.strikeStep || 50;
     const offset = this.config.strikeOffset || 0;
     const ceStrike = atm + step * offset;
     const peStrike = atm - step * offset;
@@ -832,8 +836,8 @@ export class AutoScalper {
     rsi: number, macd: string, vwapAbove: boolean, bbWidth: number, volumeZscore: number,
     pcr: number, ivPercentile: number,
   ): Promise<ScalperSignal> {
-    const step = 50;
-    const atmStrike = Math.round(spot / step) * step;
+    const step = this.config.strikeStep || 50;
+    const atmStrike = this.atmAround(spot);
     const optType: OptSide = isBull ? "CE" : "PE";
 
     // Resolve strike with delta check — walk toward ATM until delta >= minDelta
@@ -1224,7 +1228,7 @@ export class AutoScalper {
       // strike at entry (trade.strike), not the live ATM that drifts with spot.
       // A per-bar moving strike recomputes RSI on a different contract than the
       // one entered — a stale-SL artifact that exits winners early.
-      const strike = trade.strike || (Math.round(spot / 50) * 50);
+      const strike = trade.strike || this.atmAround(spot);
 
       // Try to fetch real option candles for the trade's optType
       let optCandles: any[] = [];
@@ -1358,8 +1362,15 @@ export class AutoScalper {
 
   /** Look up a pending/filled broker order for the given ref+qty — idempotency
    *  guard so a lost response never causes a double entry. */
+  // Round spot to nearest strike-step — 50 for NIFTY group, 100 for
+  // BANKNIFTY/SENSEX/MIDCPNIFTY. Centralizes the ATM strike per instrument.
+  private atmAround(spot: number): number {
+    const step = this.config.strikeStep || 50;
+    return Math.round(spot / step) * step;
+  }
+
   // Cached chain getter — 5s TTL. Callers that read OI/IV/LTP/delta all tolerate
-  // sub-poll staleness; freshest data still lands on the call that misses.
+  // sub-poll staleness; fresh data still lands on the call that misses.
   private async getCachedChain(expiry?: string): Promise<any> {
     const key = `${this.config.symbol}|${expiry ?? this.config.optionExpiry}|${this.config.exchange}`;
     const now = Date.now();
