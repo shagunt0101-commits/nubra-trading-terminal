@@ -1313,9 +1313,10 @@ function shutdown(signal: string) {
   logger.info({ signal }, `[Shutdown] ${signal} received, closing gracefully`);
   wss.close(() => logger.info("[Shutdown] WebSocket server closed"));
   server.close(() => {
-    scalper.persist();
-    logger.info("[Shutdown] HTTP server closed, state persisted");
-    process.exit(0);
+    scalper.flushPersist().then(() => {
+      logger.info("[Shutdown] HTTP server closed, state persisted");
+      process.exit(0);
+    });
   });
   // If forced shutdown after 5s
   setTimeout(() => { logger.warn("[Shutdown] Forced exit after timeout"); process.exit(1); }, 5000).unref();

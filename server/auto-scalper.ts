@@ -2,7 +2,8 @@ import { nubraApi, getSessionToken, nubraLogin, fetchOptionSymbol, fetchOptionCa
 import { calculateRSI, calculateSMA, calculateEMA, calculateMACD, calculateBollingerBands } from "./indicators.js";
 import { fetchCandles } from "./market-data.js";
 import { evaluateTrendContinuation, evaluateBBMeanReversal, evaluateRSIReversal, evaluateTrendFollow } from "./strategy-engine.js";
-import { writeFileSync, readFileSync, existsSync, renameSync } from "fs";
+import { readFileSync, existsSync } from "fs";
+import { writeFile, readFile, rename } from "fs/promises";
 import { join } from "path";
 import logger from "./logger.js";
 
@@ -13,6 +14,16 @@ const STATE_DIR = process.env.TMPDIR || process.env.TEMP || "/tmp";
 const STATE_FILE = join(STATE_DIR, "mvf-scalper-state.json");
 const TMP_FILE = join(STATE_DIR, "mvf-scalper-state.json.tmp");
 const BACKUP_FILE = join(STATE_DIR, "mvf-scalper-state.json.bak");
+
+// Async debounced persist — parsing/stringifying a 500-trade journal on every
+// log line was blocking the poll. 150ms debounce + drain-on-exit/stop keeps
+// durability while keeping the event loop free; a crash loses only ≤150ms of
+// journal tail (worst trade state is the same file, re-synced by operator).
+let persistTimer: ReturnType<typeof setTimeout> | null = null;
+function schedulePersist(fn: () => void) {
+  if (persistTimer) clearTimeout(persistTimer);
+  persistTimer = setTimeout(fn, 150);
+}
 
 interface PersistedState {
   trades: TradeRecord[];
@@ -44,15 +55,18 @@ function loadState(): PersistedState {
   return { trades: [], logs: [], activeTrade: null, stats: { totalPnl: 0, totalWins: 0, totalLosses: 0 } };
 }
 
-function saveState(state: PersistedState) {
-  // Atomic write: tmp file + rename. A bare writeFileSync truncates first — a
-  // crash mid-write corrupts the file and loadState silently reset to zero.
+async function saveState(state: PersistedState) {
+  // Atomic write: tmp file + rename. A bare write truncates first — a crash
+  // mid-write corrupts the file and loadState silently reset to zero.
   try {
-    writeFileSync(TMP_FILE, JSON.stringify(state, null, 2), "utf-8");
-    if (existsSync(STATE_FILE)) {
-      try { writeFileSync(BACKUP_FILE, readFileSync(STATE_FILE)); } catch { /* backup best-effort */ }
-    }
-    renameSync(TMP_FILE, STATE_FILE);
+    await writeFile(TMP_FILE, JSON.stringify(state, null, 2), "utf-8");
+    try {
+      if (existsSync(STATE_FILE)) { // existsSync sync is fine — tiny read, not the hot path
+        const backup = await readFile(STATE_FILE);
+        await writeFile(BACKUP_FILE, backup);
+      }
+    } catch { /* backup best-effort */ }
+    await rename(TMP_FILE, STATE_FILE);
   } catch (e: any) {
     logger.error({ err: e?.message }, "[Scalper] Failed to persist state");
   }
@@ -281,15 +295,25 @@ export class AutoScalper {
     }
   }
 
+  // Async, debounced: each mutation journaled to state via schedulePersist.
   public persist() {
-    saveState({
-      trades: this.trades.slice(-500), // cap at 500 trades
-      logs: this.logs.slice(-500),     // cap at 500 log entries
+    schedulePersist(() => { void saveState(this.stateSnapshot()); });
+  }
+  private stateSnapshot(): PersistedState {
+    return {
+      trades: this.trades.slice(-500),
+      logs: this.logs.slice(-500),
       activeTrade: this.activeTrade,
       stats: { totalPnl: this.totalPnl, totalWins: this.totalWins, totalLosses: this.totalLosses },
       dailyPnl: this.dailyPnl,
       mode: this.mode,
-    });
+    };
+  }
+
+  // Flush pending debounced persist immediately (stop/close/shutdown paths).
+  public async flushPersist(): Promise<void> {
+    if (persistTimer) { clearTimeout(persistTimer); persistTimer = null; }
+    await saveState(this.stateSnapshot());
   }
 
   // ── Risk helpers ────────────────────────────────────────
