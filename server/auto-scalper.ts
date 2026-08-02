@@ -689,10 +689,18 @@ export class AutoScalper {
     let ceOptCandles: any[] = [];
     let peOptCandles: any[] = [];
     try {
-      const ceSym = await fetchOptionSymbol(this.config.symbol, ceStrike, "CE", this.config.exchange);
-      const peSym = await fetchOptionSymbol(this.config.symbol, peStrike, "PE", this.config.exchange);
-      if (ceSym) ceOptCandles = await fetchCandlesInternal(ceSym, this.config.exchange, "1m", closes.length);
-      if (peSym) peOptCandles = await fetchCandlesInternal(peSym, this.config.exchange, "1m", closes.length);
+      // Resolve CE/PE symbols and fetch their OHLC in parallel — sequential
+      // awaits cost a full broker round-trip each.
+      const [ceSym, peSym] = await Promise.all([
+        fetchOptionSymbol(this.config.symbol, ceStrike, "CE", this.config.exchange),
+        fetchOptionSymbol(this.config.symbol, peStrike, "PE", this.config.exchange),
+      ]);
+      const [ceCandles, peCandles] = await Promise.all([
+        ceSym ? fetchCandlesInternal(ceSym, this.config.exchange, "1m", closes.length) : Promise.resolve([] as any[]),
+        peSym ? fetchCandlesInternal(peSym, this.config.exchange, "1m", closes.length) : Promise.resolve([] as any[]),
+      ]);
+      ceOptCandles = ceCandles;
+      peOptCandles = peCandles;
     } catch (e: any) { logger.warn({ err: e }, "[Scalper] Option candle fetch failed"); }
 
     const ceUsed = ceOptCandles.length >= period + 1;
