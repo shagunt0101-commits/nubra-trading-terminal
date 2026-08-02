@@ -248,6 +248,11 @@ export class AutoScalper {
   private dailyPnl = 0;
   private dailyPnlDate = "";
 
+  // Option chain is read 6× per poll lifecycle (computeS2, resolveStrike, entry,
+  // exits). 5s TTL collapses them to ~1 broker call per poll window.
+  private chainCache: { data: any; ts: number } | null = null;
+  private static readonly CHAIN_CACHE_TTL = 5_000;
+
   constructor(cfg?: Partial<ScalperConfig>) {
     this.config = { ...DEFAULT_CONFIG, ...INSTRUMENT_DEFAULTS[cfg?.symbol || "NIFTY"], ...cfg };
     const state = loadState();
@@ -558,7 +563,7 @@ export class AutoScalper {
 
     // Fetch option chain for PCR/IV
     try {
-      const optChain = await nubraApi.getOptionChain(this.config.symbol, this.config.optionExpiry, this.config.exchange);
+      const optChain = await this.getCachedChain();
       const chain = optChain?.chain || optChain;
       const ceList = (chain?.ce || []).filter((c: any) => (c.sp || 0) > 0);
       const peList = (chain?.pe || []).filter((p: any) => (p.sp || 0) > 0);
@@ -669,7 +674,7 @@ export class AutoScalper {
     }
 
     // 3. Fetch option chain for ATM/ITM strikes
-    const optChain = await nubraApi.getOptionChain(this.config.symbol, this.config.optionExpiry, this.config.exchange).catch(() => null);
+    const optChain = await this.getCachedChain().catch(() => null);
     const chain = (optChain as any)?.chain || optChain || {};
     const ceList: any[] = (chain.ce || []).filter((c: any) => (c.sp || 0) > 0);
     const peList: any[] = (chain.pe || []).filter((p: any) => (p.sp || 0) > 0);
@@ -804,7 +809,7 @@ export class AutoScalper {
     let premium = isBull ? spot * 0.006 : spot * 0.005;
 
     try {
-      const optChain = await nubraApi.getOptionChain(this.config.symbol, this.config.optionExpiry, this.config.exchange);
+      const optChain = await this.getCachedChain();
       const chain = optChain?.chain || optChain;
       const optList = (isBull ? chain?.ce : chain?.pe) || [];
 
@@ -962,7 +967,7 @@ export class AutoScalper {
       // Find the correct ref_id for the target strike option
       let refId: number;
       try {
-        const optChain = await nubraApi.getOptionChain(this.config.symbol, "", this.config.exchange);
+        const optChain = await this.getCachedChain().catch(() => null);
         const chain = optChain?.chain || optChain;
         const optList = signal.optType === "CE" ? chain?.ce || [] : chain?.pe || [];
         const match = optList.find((o: any) => Math.round((o.sp || 0) / 100) === signal.targetStrike);
@@ -1052,7 +1057,7 @@ export class AutoScalper {
         currentPremium = Math.max(currentPremium, trade.entryPremium * 0.15);
       } else {
         try {
-          const optChain = await nubraApi.getOptionChain(this.config.symbol, this.config.optionExpiry, this.config.exchange);
+          const optChain = await this.getCachedChain();
           const chain = optChain?.chain || optChain;
           const optList = trade.optType === "CE" ? chain?.ce || [] : chain?.pe || [];
           const match = optList.find((o: any) => Math.round((o.sp || 0) / 100) === trade.strike);
@@ -1242,7 +1247,7 @@ export class AutoScalper {
       // Get correct refId for this strike+optType for the exit order
       let refId = 0;
       try {
-        const optChain = await nubraApi.getOptionChain(this.config.symbol, this.config.optionExpiry, this.config.exchange);
+        const optChain = await this.getCachedChain();
         const chain = optChain?.chain || optChain;
         const optList = trade.optType === "CE" ? chain?.ce || [] : chain?.pe || [];
         const match = optList.find((o: any) => Math.round((o.sp || 0) / 100) === trade.strike);
@@ -1321,6 +1326,17 @@ export class AutoScalper {
 
   /** Look up a pending/filled broker order for the given ref+qty — idempotency
    *  guard so a lost response never causes a double entry. */
+  // Cached chain getter — 5s TTL. Callers that read OI/IV/LTP/delta all tolerate
+  // sub-poll staleness; freshest data still lands on the call that misses.
+  private async getCachedChain(expiry?: string): Promise<any> {
+    const key = `${this.config.symbol}|${expiry ?? this.config.optionExpiry}|${this.config.exchange}`;
+    const now = Date.now();
+    if (this.chainCache && this.chainCache.ts + AutoScalper.CHAIN_CACHE_TTL > now) return this.chainCache.data;
+    const optChain = await nubraApi.getOptionChain(this.config.symbol, expiry ?? this.config.optionExpiry, this.config.exchange);
+    this.chainCache = { data: optChain, ts: now };
+    return optChain;
+  }
+
   private async findPendingOrder(refId: number, qty: number): Promise<any | null> {
     const orders = await nubraApi.getOrders();
     const list = Array.isArray(orders) ? orders : (orders?.orders || orders?.data || []);
