@@ -7,6 +7,27 @@ WebSocket market-data protocol (confirmed against their published docs — not g
 session or network access in the environment this plan was written in. Verify the exact
 message framing against a real UAT connection before trusting any byte-level detail below.
 
+**Verified 2026-08-02 against the shipped `nubra-sdk==0.5.0` wheel** (ticker/websocketdata.py
++ protos/nubrafrontend_pb2.py — ground truth, beats docs). Three doc errors found:
+- Envelope is NOT `GenericData {string key; Any data}` — it is an **Any-of-Any**: outer
+  Any's `value` holds a second Any whose `type_url` suffix names the message. No
+  `GenericData` message exists in the shipped schema. Decode: outer Any → inner Any →
+  dispatch on inner type_url suffix.
+- PROD endpoint is `wss://api2.nubra.io/apibatch/ws`, NOT api.nubra.io (UAT matches:
+  wss://uatapi.nubra.io/apibatch/ws). Resolve at runtime via `/userinfo` env_info.market_ws_url
+  if paranoid.
+- `orderbook_depth` and `socket_interval` are SEPARATE text commands
+  (`batch_subscribe <token> orderbook_depth <1-20>`), not subscribe-payload fields.
+- Orderbook proto (field numbers from pb2): `BatchWebSocketOrderbookMessage{ timestamp=1;
+  repeated WebSocketMsgOrderBook instruments=2 }`; `WebSocketMsgOrderBook{ inst_id=1;
+  timestamp=2; repeated OrderBookLevel bids=3; asks=4; ltp=5; ltq=6; volume=7; ref_id=8 }`;
+  `OrderBookLevel{ price=1; quantity=2; orders=3 }` (all int64, wire varint).
+- UAT and PROD ref_ids DIFFER (docs FAQ: NIFTY25NOV25500CE → UAT 69353, PROD 81462) —
+  always resolve via `getInstruments()` in the live env, never hardcode.
+- Stage 1 implementation landed in `server/nubra-ws.ts` (2026-08-02) using these facts,
+  with a frame-decode unit test. protobufjs+ws were already transitive deps — no new
+  runtime needed. Still requires the live UAT byte-check before trusting the feed.
+
 ---
 
 ## What Nubra's API actually gives you
