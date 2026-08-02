@@ -50,7 +50,7 @@ export default function OrderBook({ orders, onCancelOrder, isLoading }: OrderBoo
   });
 
   return (
-    <div className="bg-brand-card border border-brand-border rounded-lg p-5 shadow-2xl flex flex-col min-h-[280px] h-auto overflow-hidden">
+    <div className="glass-surface border border-brand-border rounded-lg p-5 shadow-2xl flex flex-col min-h-[280px] h-auto overflow-hidden">
       {/* Header with tabs */}
       <div className="flex items-center justify-between border-b border-brand-border pb-3 mb-3 glass-base/40">
         <div className="flex items-center gap-2">

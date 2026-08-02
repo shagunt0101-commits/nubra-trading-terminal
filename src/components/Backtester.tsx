@@ -92,7 +92,7 @@ export default function Backtester({ selectedInstrument, selectedInterval, onInt
   };
 
   return (
-    <div className="bg-brand-card border border-brand-border rounded-lg p-5 shadow-2xl flex flex-col flex-1 min-h-0 overflow-hidden">
+    <div className="glass-surface border border-brand-border rounded-lg p-5 shadow-2xl flex flex-col flex-1 min-h-0 overflow-hidden">
       {/* Header Controls */}
       <div className="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3 border-b border-brand-border pb-3 mb-4 glass-base/50">
         <div className="flex items-center gap-2">

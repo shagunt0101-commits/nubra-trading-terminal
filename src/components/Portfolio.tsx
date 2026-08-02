@@ -21,7 +21,7 @@ export default function Portfolio({ portfolio }: PortfolioProps) {
   const totalPnlChg = holdingStats ? holdingStats.totalPnlChg : 7.14;
 
   return (
-    <div className="bg-brand-card border border-brand-border rounded-lg p-5 shadow-2xl flex flex-col min-h-[280px] h-auto overflow-hidden">
+    <div className="glass-surface border border-brand-border rounded-lg p-5 shadow-2xl flex flex-col min-h-[280px] h-auto overflow-hidden">
       {/* Tab Select and Overview stats */}
       <div className="flex items-center justify-between border-b border-brand-border pb-3 mb-3 glass-base/40">
         <div className="flex gap-2">
