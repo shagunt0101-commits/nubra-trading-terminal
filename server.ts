@@ -36,7 +36,21 @@ const WS_INDEX_MAP: Record<string, { ref_id: number }> = {
   FINNIFTY:  { ref_id: 1005 },
 };
 
-wss.on("connection", (ws) => {});
+// WS heartbeat: mark isAlive on pong, terminate dead (half-open FIN-less) sockets.
+wss.on("connection", (ws) => {
+  (ws as any).isAlive = true;
+  ws.on("pong", () => { (ws as any).isAlive = true; });
+  ws.on("error", (e) => logger.warn({ err: e }, "[WS] client error"));
+  ws.on("close", () => { /* socket already reaped by ws lib */ });
+});
+const wsHeartbeat = setInterval(() => {
+  wss.clients.forEach((ws: any) => {
+    if (ws.isAlive === false) { ws.terminate(); return; }
+    ws.isAlive = false;
+    try { ws.ping(); } catch { ws.terminate(); }
+  });
+}, 30_000);
+wsHeartbeat.unref();
 
 // Broadcast loop — broker data only, no simulated jitter fallback
 async function wsBroadcastQuotes() {
@@ -81,10 +95,13 @@ async function wsBroadcastQuotes() {
   } catch (e) { logger.warn({ err: e }, "[WS Premium] Failed to fetch option premium"); }
   const msg = JSON.stringify({ type: "quotes", data: batch, premium });
   wss.clients.forEach((client) => {
-    if (client.readyState === 1) client.send(msg);
+    if (client.readyState === 1) {
+      try { client.send(msg); }
+      catch (e: any) { client.terminate(); logger.warn({ err: e }, "[WS] send failed, terminated client"); }
+    }
   });
 }
-if (!process.env.VERCEL) setInterval(wsBroadcastQuotes, WS_BROADCAST_INTERVAL);
+if (!process.env.VERCEL) setInterval(wsBroadcastQuotes, WS_BROADCAST_INTERVAL).unref();
 
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
@@ -209,11 +226,18 @@ app.get("/api/auth/status", (req, res) => {
 });
 
 app.post("/api/auth/login", async (req, res) => {
-  const token = await nubraLogin();
-  if (token) {
-    res.json({ success: true, token, state: getLoginState() });
-  } else {
-    res.status(401).json({ success: false, error: getLoginState().error });
+  // Security: the broker session token stays server-side. The browser only needs
+  // success/state — shipping the 745-char session JWT into client JS would expose
+  // the broker bearer to any XSS. Removed after audit finding.
+  try {
+    const token = await nubraLogin();
+    if (token) {
+      res.json({ success: true, state: getLoginState() });
+    } else {
+      res.status(401).json({ success: false, error: getLoginState().error });
+    }
+  } catch (e: any) {
+    res.status(500).json({ success: false, error: `Login failed: ${e.message}` });
   }
 });
 
@@ -233,7 +257,7 @@ app.post("/api/auth/verify-otp", async (req, res) => {
   }
   const result = await nubraVerifyOtp(otp, tempToken, phone);
   if (result.success) {
-    res.json({ success: true, token: result.token, state: getLoginState() });
+    res.json({ success: true, state: getLoginState() });
   } else {
     res.status(401).json({ success: false, error: result.error });
   }
@@ -1299,5 +1323,17 @@ function shutdown(signal: string) {
 
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
+
+// Process-level crash guards: Node >=15 kills the process on an unhandled
+// rejection, and a stray exception stops the terminal mid-market. Log loudly;
+// exit nonzero so a supervisor (pm2/systemd/Vercel) restarts us. Never swallow.
+process.on("unhandledRejection", (reason) => {
+  logger.error({ reason }, "[Process] unhandledRejection — exiting (supervisor should restart)");
+  process.exit(1);
+});
+process.on("uncaughtException", (err) => {
+  logger.error({ err }, "[Process] uncaughtException — exiting (supervisor should restart)");
+  process.exit(1);
+});
 
 export default app;

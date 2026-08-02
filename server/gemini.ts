@@ -102,8 +102,28 @@ Analyze this data and return the professional screening & signaling report with 
 
   // Custom AI Provider Flow
   if (marketContext.aiProvider === "custom") {
-    const customKey = marketContext.customApiKey || process.env.CUSTOM_AI_API_KEY || "sk-465c5eb94747369b-79rdet-df5f3014";
-    let customUrl = marketContext.customBaseUrl || process.env.CUSTOM_AI_BASE_URL || "https://r3uxl5j.abc-tunnel.us/v1";
+    // Security: a key from the client may only be used against a URL the client
+    // also supplied (it is the client's own key). The env key (operator secret)
+    // must NEVER be forwarded to a client-supplied URL — that is a key-exfiltration
+    // channel. Resolve URL strictly from env whenever the env key is in play.
+    const clientKey: string | undefined = marketContext.customApiKey;
+    const envKey = process.env.CUSTOM_AI_API_KEY;
+    const keySource = clientKey ? "client" : (envKey ? "env" : "none");
+    if (keySource === "none") {
+      throw new Error("CUSTOM_AI_API_KEY not set and no client key provided");
+    }
+    const customKey = keySource === "client" ? clientKey! : envKey!;
+    const customUrl = keySource === "client"
+      ? (marketContext.customBaseUrl || process.env.CUSTOM_AI_BASE_URL)
+      : process.env.CUSTOM_AI_BASE_URL;
+    if (!customUrl) {
+      throw new Error(`CUSTOM_AI_BASE_URL is required when using the ${keySource} key`);
+    }
+    let parsedUrl: URL;
+    try { parsedUrl = new URL(customUrl); } catch (e) { throw new Error(`Invalid CUSTOM_AI_BASE_URL: ${customUrl}`); }
+    if (parsedUrl.protocol !== "https:") {
+      throw new Error("CUSTOM_AI_BASE_URL must use https");
+    }
     const customModel = marketContext.customModel || process.env.CUSTOM_AI_MODEL || "ag1";
 
     // Normalize Base URL to chat/completions endpoint

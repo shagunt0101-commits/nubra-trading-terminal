@@ -2,14 +2,17 @@ import { nubraApi, getSessionToken, nubraLogin, fetchOptionSymbol, fetchOptionCa
 import { calculateRSI, calculateSMA, calculateEMA, calculateMACD, calculateBollingerBands } from "./indicators.js";
 import { toPerBarVolume, daysBackFor } from "./market-data.js";
 import { evaluateTrendContinuation, evaluateBBMeanReversal, evaluateRSIReversal, evaluateTrendFollow } from "./strategy-engine.js";
-import { writeFileSync, readFileSync, existsSync } from "fs";
+import { writeFileSync, readFileSync, existsSync, renameSync } from "fs";
 import { join } from "path";
 import logger from "./logger.js";
 
 // Stored OUTSIDE repo root (tmp dir) — any file written inside cwd triggers a
 // Vite full page reload ("page reload .scalper-state.json" in dev logs), which
 // remounts the app and appears to "stop the scalper" on every persist.
-const STATE_FILE = join(process.env.TMPDIR || process.env.TEMP || "/tmp", "mvf-scalper-state.json");
+const STATE_DIR = process.env.TMPDIR || process.env.TEMP || "/tmp";
+const STATE_FILE = join(STATE_DIR, "mvf-scalper-state.json");
+const TMP_FILE = join(STATE_DIR, "mvf-scalper-state.json.tmp");
+const BACKUP_FILE = join(STATE_DIR, "mvf-scalper-state.json.bak");
 
 interface PersistedState {
   trades: TradeRecord[];
@@ -23,14 +26,36 @@ interface PersistedState {
 function loadState(): PersistedState {
   if (existsSync(STATE_FILE)) {
     try {
-      return JSON.parse(readFileSync(STATE_FILE, "utf-8"));
-    } catch { /* ignore */ }
+      const parsed = JSON.parse(readFileSync(STATE_FILE, "utf-8"));
+      if (!parsed || typeof parsed !== "object") throw new Error("state is not an object");
+      return parsed;
+    } catch (e: any) {
+      // Corruption (crash mid-write) must NOT silently reset to empty — the
+      // operator needs to know an OPEN trade may exist. Log loudly, keep a .bak
+      // if present. Atomic write (tmp+rename) below makes this path rare.
+      logger.error({ err: e?.message, file: STATE_FILE }, "[Scalper] State file corrupt/unreadable — refusing to auto-resume. Check broker for open positions before restarting.");
+      if (existsSync(BACKUP_FILE)) {
+        try { return JSON.parse(readFileSync(BACKUP_FILE, "utf-8")); }
+        catch { /* no backup either */ }
+      }
+      return { /* empty */ } as PersistedState;
+    }
   }
   return { trades: [], logs: [], activeTrade: null, stats: { totalPnl: 0, totalWins: 0, totalLosses: 0 } };
 }
 
 function saveState(state: PersistedState) {
-  writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+  // Atomic write: tmp file + rename. A bare writeFileSync truncates first — a
+  // crash mid-write corrupts the file and loadState silently reset to zero.
+  try {
+    writeFileSync(TMP_FILE, JSON.stringify(state, null, 2), "utf-8");
+    if (existsSync(STATE_FILE)) {
+      try { writeFileSync(BACKUP_FILE, readFileSync(STATE_FILE)); } catch { /* backup best-effort */ }
+    }
+    renameSync(TMP_FILE, STATE_FILE);
+  } catch (e: any) {
+    logger.error({ err: e?.message }, "[Scalper] Failed to persist state");
+  }
 }
 export type ScalperMode = "SCANNING" | "ENTRY" | "EXIT" | "IDLE" | "STOPPED" | "ERROR";
 export type OptSide = "CE" | "PE";
@@ -103,7 +128,7 @@ export interface ScalperSignal {
 export interface TradeLog {
   id: string;
   ts: number;
-  type: "SIGNAL" | "ENTRY" | "EXIT" | "SL_HIT" | "TARGET_HIT" | "SKIP" | "ERROR" | "STATE";
+  type: "SIGNAL" | "ENTRY" | "EXIT" | "SL_HIT" | "TARGET_HIT" | "SKIP" | "ERROR" | "STATE" | "WARN";
   msg: string;
   data?: any;
 }
@@ -233,12 +258,21 @@ export class AutoScalper {
     this.totalWins = state.stats?.totalWins ?? 0;
     this.totalLosses = state.stats?.totalLosses ?? 0;
     this.dailyPnl = state.dailyPnl || 0;
-    // Auto-resume after a server restart so a page reload doesn't kill the engine
-    if (state.mode === "SCANNING" || state.mode === "EXIT") {
+    // Auto-resume after a server restart so a page reload doesn't kill the engine.
+    // Security-of-position: if the persisted state says an OPEN trade existed
+    // (mode EXIT), we CANNOT trust that the broker still holds it — the exit may
+    // have filled while we were down, or the broker squared it off at 15:30.
+    // Resuming EXIT would re-issue a SELL for a position we may no longer have.
+    // Stop the engine instead and let the operator reconcile against broker.
+    if (state.mode === "SCANNING") {
       this.mode = "SCANNING";
       this.startTime = Date.now();
       this.log("STATE", "Restored SCANNING from persisted state");
       this.schedulePoll();
+    } else if (state.mode === "EXIT" && state.activeTrade) {
+      this.mode = "STOPPED";
+      this.activeTrade = { ...state.activeTrade, status: "STOPPED" };
+      this.log("STATE", "Restores EXIT with open trade — LEFT STOPPED: reconcile position against broker before resuming (see /api/scalper/positions)", { trade: this.activeTrade });
     }
   }
 
@@ -697,12 +731,20 @@ export class AutoScalper {
     const ceUsed = ceOptCandles.length >= period + 1;
     const peUsed = peOptCandles.length >= period + 1;
 
+    // Real last-bar premium for each side (chain LTP wins; else best real candle close).
+    const ceLtp = ceList.find((o: any) => Math.round((o.sp || 0) / 100) === ceStrike)?.ltp;
+    const peLtp = peList.find((o: any) => Math.round((o.sp || 0) / 100) === peStrike)?.ltp;
+    const lastIdx = closes.length - 1;
+    const ceLastReal = ceLtp ? ceLtp / 100 : (ceUsed && ceOptCandles[lastIdx]?.close > 0 ? ceOptCandles[lastIdx].close : 0);
+    const peLastReal = peLtp ? peLtp / 100 : (peUsed && peOptCandles[lastIdx]?.close > 0 ? peOptCandles[lastIdx].close : 0);
+
     // 5. Expiry day filter: skip PE after expiryFilterCE
     if (isExpiry && this.config.expiryFilterCE && timeStr >= this.config.expiryFilterCE) {
       this.log("SKIP", `Expiry day — past ${this.config.expiryFilterCE}, PE entries blocked`);
     }
 
-    // 6. Build premium series from real option candles (aligned by timestamp index) or synthetic fallback
+    // 6. Build premium series from real option candles (aligned by timestamp index) or synthetic fallback.
+    //    Synthetic is a fallback only for backtest/paper parity — live entries are gated below.
     const cePremia: number[] = [];
     const pePremia: number[] = [];
     for (let i = 0; i < closes.length; i++) {
@@ -710,14 +752,8 @@ export class AutoScalper {
       const syntheticCe = c * 0.006 + Math.max(0, (c - atm) * 0.4);
       const syntheticPe = c * 0.005 + Math.max(0, (atm - c) * 0.4);
       cePremia.push(ceUsed && ceOptCandles[i]?.close > 0 ? ceOptCandles[i].close : syntheticCe);
-      pePremia.push(peUsed && peOptCandles[i]?.close > 0 ? peOptCandles[i].close : syntheticPe);
+      pePremia.push(peUsed && ceOptCandles[i]?.close > 0 ? peOptCandles[i].close : syntheticPe);
     }
-
-    // Override last with LTP if available
-    const ceLtp = ceList.find((o: any) => Math.round((o.sp || 0) / 100) === ceStrike)?.ltp;
-    const peLtp = peList.find((o: any) => Math.round((o.sp || 0) / 100) === peStrike)?.ltp;
-    if (ceLtp) cePremia[cePremia.length - 1] = ceLtp / 100;
-    if (peLtp) pePremia[pePremia.length - 1] = peLtp / 100;
 
     const ceRsiArr = calculateRSI(cePremia, period);
     const peRsiArr = calculateRSI(pePremia, period);
@@ -739,9 +775,13 @@ export class AutoScalper {
       ceRsi <= threshold && spotRsiVal > 50 ? "BUY_CE" :
       peRsi <= threshold && spotRsiVal < 50 ? "BUY_PE" : "NEUTRAL";
 
-    // Expiry CE filter only blocks PE, so still check CE
-    const canTradeCE = direction === "BUY_CE";
-    const canTradePE = direction === "BUY_PE" && !(isExpiry && this.config.expiryFilterCE && timeStr >= this.config.expiryFilterCE);
+    // 9. Entry-reality gate (LIVE MONEY): never send a broker BUY whose last-bar
+    //    entry premium is synthetic. The side we enter must have a real chain LTP
+    //    or a real per-bar option close at its strike. Synthetic entry only in paper mode.
+    const live = !this.config.paperMode;
+    const canTradeCE = direction === "BUY_CE" && (live ? ceLastReal > 0 : true);
+    const canTradePE = direction === "BUY_PE" && (live ? peLastReal > 0 : true)
+      && !(isExpiry && this.config.expiryFilterCE && timeStr >= this.config.expiryFilterCE);
 
     if (!canTradeCE && !canTradePE) {
       return { timestamp: Date.now(), direction: "NEUTRAL", confidence: 0, reasons: [],
@@ -750,7 +790,9 @@ export class AutoScalper {
     }
 
     const isBull = canTradeCE;
-    const finalPrem = isBull ? (ceLtp ? ceLtp / 100 : cePremia[cePremia.length - 1]) : (peLtp ? peLtp / 100 : pePremia[pePremia.length - 1]);
+    const finalPrem = isBull
+      ? (ceLtp ? ceLtp / 100 : (ceLastReal > 0 ? ceLastReal : cePremia[cePremia.length - 1]))
+      : (peLtp ? peLtp / 100 : (peLastReal > 0 ? peLastReal : pePremia[pePremia.length - 1]));
     const reasons = [
       `Option ${isBull ? "CE" : "PE"} 1m RSI ${(isBull ? ceRsi : peRsi).toFixed(1)} <= ${threshold}`,
       `Spot 15m RSI ${spotRsiVal.toFixed(1)} ${isBull ? "> 50" : "< 50"}`,
@@ -823,7 +865,21 @@ export class AutoScalper {
         if (targetOpt?.ltp) premium = targetOpt.ltp / 100;
         if (hasDelta) reasons.push(`delta ${Math.abs(targetOpt.delta).toFixed(2)}`);
       }
+
+      // Entry-reality gate (live money): the premium we'd enter at must be a real
+      // chain LTP. Without it the fallback computed below IS the spot model — a
+      // phantom entry. Paper mode may use the model.
+      if (!this.config.paperMode && !(targetOpt?.ltp)) {
+        this.log("SKIP", `${optType}: no real LTP at strike ${targetStrike} — not entering on synthetic premium`);
+        premium = NaN;
+      }
     } catch (e: any) { logger.warn({ err: e }, "[Scalper] Signal chain data fetch failed"); }
+
+    if (!isFinite(premium)) {
+      return { timestamp: Date.now(), direction: "NEUTRAL", confidence: 0, reasons: [],
+        rsi, macd, vwapAbove, bbWidth, volumeZscore: 0, pcr, ivPercentile,
+        atmStrike, targetStrike: 0, premium: 0, spot: Math.round(spot * 100) / 100, optType };
+    }
 
     return {
       timestamp: Date.now(), direction: isBull ? "BUY_CE" : "BUY_PE",
@@ -968,14 +1024,24 @@ export class AutoScalper {
       try {
         brokerRes = await nubraApi.createOrder([orderPayload]);
       } catch (e: any) {
-        this.log("ERROR", `Order placement failed: ${e.message}`);
-        // If LIMIT fails, try MARKET
-        orderPayload.priceType = "MARKET";
-        delete orderPayload.entryPrice;
+        // Order-integrity: a LIMIT create may have REACHED the broker while the
+        // response was lost (20s timeout → AbortError is indistinguishable from
+        // a rejection in the catch). Blindly retrying MARKET here can DOUBLE the
+        // position. Pre-retry, look the order up: if a matching open order exists,
+        // the first one landed — do NOT place a second.
         try {
-          brokerRes = await nubraApi.createOrder([orderPayload]);
+          const existing = await this.findPendingOrder(refId, qty);
+          if (existing) {
+            this.log("STATE", `First LIMIT order landed (found broker order ${existing.intentOrderId}) — not double-placing. Entry will be marked by the reconcile pass.`);
+            brokerRes = existing;
+          } else {
+            this.log("WARN", `Order placement failed: ${e.message} — no broker order found, retrying once as MARKET`);
+            orderPayload.priceType = "MARKET";
+            delete orderPayload.entryPrice;
+            brokerRes = await nubraApi.createOrder([orderPayload]);
+          }
         } catch (e2: any) {
-          this.log("ERROR", `Market order also failed: ${e2.message}`);
+          this.log("ERROR", `Order retry also failed: ${e2.message} — leaving trade unopened`);
           return;
         }
       }
@@ -1242,7 +1308,16 @@ export class AutoScalper {
       try {
         brokerRes = await nubraApi.createOrder([orderPayload]);
       } catch (e: any) {
-        this.log("ERROR", `Exit order failed: ${e.message} — marking as closed anyway`);
+        // Order-integrity: a failed EXIT must NOT mark the trade closed. The
+        // broker position is still open — the next poll would open a SECOND
+        // position on top. Mark STOPPED, free the scanner, flag for reconcile.
+        this.log("ERROR", `Exit order failed (${e.message}) — trade STOPPED for reconcile, broker position may still be open`);
+        trade.status = "STOPPED";
+        this.log("STATE", `${trade.optType} ${trade.strike} exit failed — broker position may be open. Reconcile via /api/scalper/positions before resume.`, { trade });
+        this.activeTrade = null;
+        this.mode = "SCANNING";
+        this.persist();
+        return;
       }
 
       this.closeTrade(trade, exitPremium, reason, brokerRes);
@@ -1280,6 +1355,14 @@ export class AutoScalper {
     this.activeTrade = null;
     this.mode = "SCANNING";
     this.persist();
+  }
+
+  /** Look up a pending/filled broker order for the given ref+qty — idempotency
+   *  guard so a lost response never causes a double entry. */
+  private async findPendingOrder(refId: number, qty: number): Promise<any | null> {
+    const orders = await nubraApi.getOrders();
+    const list = Array.isArray(orders) ? orders : (orders?.orders || orders?.data || []);
+    return (list as any[]).find((o: any) => Number(o.refId) === refId && Number(o.orderQty) === qty) || null;
   }
 
   // ── Logging ────────────────────────────────────────────────
