@@ -322,24 +322,62 @@ async function nubraRequest(endpoint: string, options: RequestInit = {}): Promis
 
   let res = await fetchWithTimeout(url, { ...options, headers });
 
-  // Handle Session Expiry (440) — token is dead, clear it
-  if (res.status === 440) {
-    logger.warn("[Nubra] Session expired (440), clearing token");
-    clearSession();
-    sessionToken = "";
-    throw new Error("Session expired. Please login again via OTP.");
+  // Handle Session Expiry (440 legacy, 401 new) — token is dead, clear it and
+  // TOTP re-login. 401 may ALSO be a genuine auth error ("Unauthorized" with no
+  // resendMsg); only auto-recover when the body signals session-expiry.
+  if (res.status === 440 || res.status === 401) {
+    const raw = await res.text().catch(() => "");
+    const body = raw.toLowerCase();
+    const expired = res.status === 440 || body.includes("session expired") || body.includes("session has expired") || body.includes("resendmsg");
+    if (expired) {
+      logger.warn(`[Nubra] Session expired (${res.status}), clearing token & re-login`);
+      clearSession();
+      sessionToken = "";
+      const token = await nubraLogin();
+      if (!token) {
+        throw new Error(`Session expired (${res.status}). Re-login failed: ${loginError}`);
+      }
+      headers["Authorization"] = `Bearer ${token}`;
+      res = await fetchWithTimeout(url, { ...options, headers });
+      if (res.ok) return res.json();
+      if (res.status === 440 || res.status === 401) {
+        clearSession();
+        sessionToken = "";
+        throw new Error("Session expired. Please login again via OTP.");
+      }
+    } else {
+      // Genuine auth failure (not session-expiry) — surface broker message
+      clearSession();
+      sessionToken = "";
+      throw new Error(parseErrBody(raw) || "Unauthorized: Please login again via OTP.");
+    }
   }
 
   if (!res.ok) {
     let errMsg = `Request failed: ${res.statusText}`;
     try {
-      const json = await res.json();
-      if (json.error) errMsg = json.error;
+      const text = await res.text();
+      try {
+        const json = JSON.parse(text);
+        if (json.error) errMsg = json.error;
+        if (json.message) errMsg = json.message;
+      } catch (_) {
+        if (text) errMsg = text.slice(0, 300);
+      }
     } catch (_) {}
     throw new Error(errMsg);
   }
 
   return res.json();
+}
+
+function parseErrBody(raw: string): string {
+  try {
+    const json = JSON.parse(raw);
+    if (json.error) return json.error;
+    if (json.message) return json.message;
+  } catch {}
+  return raw ? raw.slice(0, 300) : "";
 }
 
 // Expose Portfolio, Market and Order placement APIs
