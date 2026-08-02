@@ -1041,6 +1041,7 @@ app.post("/api/ai/analyze", async (req, res) => {
     customApiKey,
     customBaseUrl,
     customModel,
+    atmAnalysis,
   } = req.body;
 
   try {
@@ -1056,6 +1057,7 @@ app.post("/api/ai/analyze", async (req, res) => {
       customApiKey,
       customBaseUrl,
       customModel,
+      atmAnalysis,
     });
     res.json({ success: true, report: markdownReport });
   } catch (err: any) {

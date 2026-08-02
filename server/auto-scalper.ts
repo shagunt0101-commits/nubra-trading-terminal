@@ -1,5 +1,6 @@
 import { nubraApi, getSessionToken, nubraLogin, fetchOptionSymbol, fetchOptionCandles, fetchCandlesInternal } from "./nubra.js";
 import { calculateRSI, calculateSMA, calculateEMA, calculateMACD, calculateBollingerBands } from "./indicators.js";
+import { toPerBarVolume, daysBackFor } from "./market-data.js";
 import { evaluateTrendContinuation, evaluateBBMeanReversal, evaluateRSIReversal, evaluateTrendFollow } from "./strategy-engine.js";
 import { writeFileSync, readFileSync, existsSync } from "fs";
 import { join } from "path";
@@ -488,10 +489,11 @@ export class AutoScalper {
       if (hist?.result?.[0]?.values?.[0]) {
         const symData = hist.result[0].values[0][this.config.symbol];
         if (symData?.close) {
+          const volume = toPerBarVolume((symData.cumulative_volume || []).map((p: any) => p.v));
           candles = symData.close.map((p: any, i: number) => ({
             ts: p.ts, close: p.v / 100,
             open: symData.open[i].v / 100, high: symData.high[i].v / 100,
-            low: symData.low[i].v / 100, volume: symData.cumulative_volume?.[i]?.v || 0,
+            low: symData.low[i].v / 100, volume: volume[i] || 0,
           }));
         }
       }
@@ -510,9 +512,12 @@ export class AutoScalper {
         }
       } catch (e: any) { logger.warn({ err: e }, "[Scalper] Historical fallback fetch failed"); }
     }
-    // Filter intraday only (UTC 03:45 = IST 09:15)
-    const marketOpenUTC = new Date(); marketOpenUTC.setHours(3, 45, 0, 0); marketOpenUTC.setMilliseconds(0);
-    return candles.filter(c => c.ts >= marketOpenUTC.getTime());
+    // Filter intraday only (UTC 03:45 = IST 09:15). Broker ts is nanoseconds —
+    // normalize to ms before comparing against the wall clock, else a ns epoch
+    // (~1.7e18) is always >= ms open (~1.7e12) and every stale session passes.
+    const marketOpenUTC = new Date(); marketOpenUTC.setUTCHours(3, 45, 0, 0); marketOpenUTC.setMilliseconds(0);
+    const openMs = marketOpenUTC.getTime();
+    return candles.filter(c => c.ts >= 1e15 ? c.ts / 1e6 >= openMs : c.ts >= openMs);
   }
 
   private async computeS2(spot: number, candles: any[], closes: number[]): Promise<ScalperSignal | null> {

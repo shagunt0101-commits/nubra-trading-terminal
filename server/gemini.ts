@@ -169,7 +169,10 @@ Analyze this data and return the professional screening & signaling report with 
       return text;
     } catch (err: any) {
       logger.error({ err }, "Custom AI provider analysis failed");
-      return `### Custom AI Provider Error\nFailed to fetch analysis from Custom AI Endpoint: ${err.message}\n\n*Please verify your API key, Custom Base URL, and model name in the AI settings panel.*`;
+      // A failure must NOT look like a successful report: the route responds
+      // 500, the client surfaces the error and skips the cache. Returning a
+      // markdown here made the HTTP layer 200 it and cache the error text.
+      throw new Error(`Custom AI Endpoint failed: ${err.message}`);
     }
   }
 

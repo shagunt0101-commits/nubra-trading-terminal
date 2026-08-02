@@ -38,17 +38,9 @@ export default function MarketChart({
 
   const intervals = ["1m", "5m", "15m", "30m", "1h", "1d"];
 
-  if (!instrument) {
-    return (
-      <div className="glass-surface border border-brand-border rounded-xl p-12 text-center text-gray-500 h-[650px] flex flex-col justify-center items-center shadow-2xl glass-enter">
-        <LineChart className="h-10 w-10 text-slate-600 mb-2 animate-pulse" />
-        <span className="font-serif italic text-white/90 text-sm mb-1">Interactive Charts Offline</span>
-        <span className="text-xs text-gray-500 max-w-xs font-mono">Select an asset from the screener to view live charts and indicator grids.</span>
-      </div>
-    );
-  }
-
-  const latestPrice = chartData[chartData.length - 1]?.close || 0;
+  // Hoisted above the !instrument early return — hooks must run on EVERY render,
+  // a mount with null instrument then a populated re-render would otherwise see
+  // more hooks than the first pass and crash the panel.
   const [prevDayClose, setPrevDayClose] = useState<number | null>(null);
 
   // Day change is vs previous trading-day close, not the first candle of this chart window
@@ -63,6 +55,18 @@ export default function MarketChart({
       .catch(() => {});
     return () => { cancelled = true; };
   }, [instrument?.stock_name, instrument?.asset, instrument?.exchange]);
+
+  if (!instrument) {
+    return (
+      <div className="glass-surface border border-brand-border rounded-xl p-12 text-center text-gray-500 h-[650px] flex flex-col justify-center items-center shadow-2xl glass-enter">
+        <LineChart className="h-10 w-10 text-slate-600 mb-2 animate-pulse" />
+        <span className="font-serif italic text-white/90 text-sm mb-1">Interactive Charts Offline</span>
+        <span className="text-xs text-gray-500 max-w-xs font-mono">Select an asset from the screener to view live charts and indicator grids.</span>
+      </div>
+    );
+  }
+
+  const latestPrice = chartData[chartData.length - 1]?.close || 0;
 
   const prevPrice = prevDayClose || chartData[0]?.close || 0;
   const changePct = prevPrice > 0 ? ((latestPrice - prevPrice) / prevPrice) * 100 : 0;

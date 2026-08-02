@@ -78,6 +78,9 @@ export default function AiAnalysis({
 
   const handleGenerate = async () => {
     if (!instrument || chartData.length === 0) return;
+    // Guard against the report resolving after the user switched symbol: capture
+    // the requested key and mute the result if the selection moved on mid-flight.
+    const reqKey = `${instrument.stock_name}|${strategy}`;
     setIsLoading(true);
     setError("");
 
@@ -144,10 +147,13 @@ export default function AiAnalysis({
       }
 
       const data = await res.json();
+      const currentKey = `${instrument?.stock_name}|${strategy}`;
+      // Stale: user switched symbol while the request was in flight — drop it.
+      if (currentKey !== reqKey) return;
       setReport(data.report);
       setReportTs(Date.now());
       // Cache per symbol+strategy — shown again when revisiting, no re-fetch
-      setReportCache((c) => ({ ...c, [`${instrument.stock_name}|${strategy}`]: { report: data.report, ts: Date.now() } }));
+      setReportCache((c) => ({ ...c, [reqKey]: { report: data.report, ts: Date.now() } }));
     } catch (err: any) {
       setError(err.message || "Failed to generate AI signals.");
     } finally {
@@ -352,6 +358,14 @@ export default function AiAnalysis({
             <span className="font-serif italic text-white/90 text-sm mb-1">Signal Workspace Offline</span>
             <span className="text-[10px] text-gray-500 max-w-[240px] font-mono">Select an asset from the screener first to trigger AI analytics.</span>
           </div>
+        ) : error && !isLoading ? (
+          <div className="p-4 glass-surface border border-brand-red/20 text-brand-red rounded flex items-start gap-2.5 font-mono">
+            <ShieldAlert className="h-4 w-4 shrink-0 mt-0.5" />
+            <div className="text-xs space-y-1">
+              <p className="font-bold uppercase">Analysis Refused</p>
+              <p className="text-gray-400">{error}</p>
+            </div>
+          </div>
         ) : !report && !isLoading ? (
           <div className="h-full flex flex-col items-center justify-center text-gray-500 text-xs text-center space-y-3">
             <FileText className="h-8 w-8 text-slate-700" />
@@ -373,16 +387,8 @@ export default function AiAnalysis({
                 {aiProvider === "gemini" ? "Gemini" : "Custom AI"} is processing market parameters...
               </p>
               <p className="text-[10px] text-gray-500 max-w-[280px] font-mono mx-auto">
-                Calculating RSI oscillators, matching options chains, evaluating margin thresholds, and framing target stoplosses.
+                Calculating RSI oscillators, matching price chains, evaluating margin thresholds, and framing target stoplosses.
               </p>
-            </div>
-          </div>
-        ) : error ? (
-          <div className="p-4 glass-surface border border-brand-red/20 text-brand-red rounded flex items-start gap-2.5 font-mono">
-            <ShieldAlert className="h-4 w-4 shrink-0 mt-0.5" />
-            <div className="text-xs space-y-1">
-              <p className="font-bold uppercase">Analysis Refused</p>
-              <p className="text-gray-400">{error}</p>
             </div>
           </div>
         ) : (

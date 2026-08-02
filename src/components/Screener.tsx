@@ -89,7 +89,14 @@ export default function Screener({
       const opt = instruments.find(i => i.asset === item.asset && i.derivative_type === "OPT");
       if (opt && quotes[opt.ref_id]) continue; // already have live data
       fetchedRef.current.add(item.asset);
-      if (opt) {
+      // Indices broadcast under synthetic refs; never resolve their fallback
+      // from an option contract's LTP (unit = premium). Use the spot route.
+      if (INDEX_ASSETS.includes(item.asset)) {
+        fetch(`/api/market/spot/${item.asset}?exchange=${item.exchange || 'NSE'}`)
+          .then(r => r.ok ? r.json() : null)
+          .then(d => { if (d?.price) setFallbackPrices(p => ({ ...p, [item.asset]: d.price })); })
+          .catch(() => {});
+      } else if (opt) {
         fetch(`/api/market/quote/${opt.ref_id}`)
           .then(r => r.ok ? r.json() : null)
           .then(d => { if (d?.price) setFallbackPrices(p => ({ ...p, [item.asset]: d.price })); })
@@ -168,9 +175,16 @@ export default function Screener({
             );
           }) : filteredFno.map((item) => {
             const isSelected = selectedInstrument?.asset === item.asset;
+            // WS broadcasts indices under synthetic refs 1001-1005 (server WS_INDEX_MAP),
+            // never the option-contract refs. Resolve the row price from the index
+            // broadcast first; fall back to the option contract's LTP only when the
+            // asset has no broadcast (real FUT/OPT quotes).
+            const WS_INDEX_REFS: Record<string, number> = { NIFTY: 1001, BANKNIFTY: 1002, SENSEX: 1003, MIDCPNIFTY: 1004, FINNIFTY: 1005 };
+            const wsQuote = WS_INDEX_REFS[item.asset] ? (quotes[WS_INDEX_REFS[item.asset]] || null) : null;
             const optInst = instruments.find((i) => i.asset === item.asset && i.derivative_type === "OPT");
-            const quote = optInst ? (quotes[optInst.ref_id] || null) : null;
-            const price = quote?.price ?? fallbackPrices[item.asset];
+            const optQuote = wsQuote ? null : (optInst ? (quotes[optInst.ref_id] || null) : null);
+            const quote = wsQuote || optQuote;
+            const price = (quote && quote.price > 0) ? quote.price : fallbackPrices[item.asset];
             const change = quote?.change ?? 0;
 
             return (
@@ -197,7 +211,7 @@ export default function Screener({
                       </span>
                       {change !== 0 && (
                         <div className={`flex items-center justify-end text-xs font-semibold font-mono ${change >= 0 ? "text-brand-green" : "text-brand-red"}`}>
-                          {change >= 0 ? "+" : ""}{(change * 100).toFixed(2)}%
+                          {change >= 0 ? "+" : ""}{change.toFixed(2)}%
                         </div>
                       )}
                     </>
@@ -318,7 +332,7 @@ export default function Screener({
                     change >= 0 ? "text-brand-green" : "text-brand-red"
                   }`}>
                     {change >= 0 ? "+" : ""}
-                    {(change * 100).toFixed(2)}%
+                    {change.toFixed(2)}%
                   </div>
                 </div>
               </div>
