@@ -13,6 +13,7 @@ import { getGlobalSentiment } from "./server/global.js";
 import { nubraApi, nubraLogin, nubraSendOtp, nubraVerifyOtp, getLoginState, getSessionToken } from "./server/nubra.js";
 import { fetchCandles } from "./server/market-data.js";
 import { runBacktest, PREMIUM_STRATEGIES } from "./server/backtest-engine.js";
+import { computeRiskMetrics } from "./server/risk-metrics.js";
 import { scalper } from "./server/scalper-instance.js";
 import logger from "./server/logger.js";
 import { validateEnv } from "./server/env.js";
@@ -614,6 +615,7 @@ app.post("/api/backtest", async (req, res) => {
         exitMode: req.body.exitMode || "phase",
         maxHoldBars: req.body.maxHoldBars,
       });
+      const risk = computeRiskMetrics(bt.trades);
       res.json({
         summary: {
           initialBalance: 100000,
@@ -625,6 +627,12 @@ app.post("/api/backtest", async (req, res) => {
           winningTrades: bt.trades.filter((t) => t.result === "WIN").length,
           losingTrades: bt.trades.length - bt.trades.filter((t) => t.result === "WIN").length,
           profitFactor: Math.round(bt.summary.profitFactor * 100) / 100,
+          // null when <15 trades — not enough samples for a meaningful Sharpe
+          sharpe: risk.sharpe,
+          maxDrawdownPct: risk.maxDrawdownPct,
+          maxDrawdownDurationDays: risk.maxDrawdownDurationDays,
+          calmar: risk.calmar,
+          annualizedReturnPct: risk.annualizedReturnPct,
         },
         trades: bt.trades.map((t) => ({
           ...t,

@@ -278,6 +278,40 @@ export default function Backtester({ selectedInstrument, selectedInterval, onInt
               </div>
             </div>
 
+            {/* Risk Metrics — only present for premium-model strategies; null
+                fields mean the sample size (<15 trades) is too small to trust. */}
+            {results!.summary.maxDrawdownPct !== undefined && (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div className="bg-black p-3 rounded border border-brand-border">
+                  <span className="block text-[9px] uppercase font-bold text-gray-500 tracking-wider font-mono">Sharpe Ratio</span>
+                  <span className="block font-mono text-sm sm:text-base font-bold text-white mt-1">
+                    {results!.summary.sharpe != null ? results!.summary.sharpe.toFixed(2) : "— (n<15)"}
+                  </span>
+                </div>
+
+                <div className="bg-black p-3 rounded border border-brand-border">
+                  <span className="block text-[9px] uppercase font-bold text-gray-500 tracking-wider font-mono">Max Drawdown</span>
+                  <span className="block font-mono text-sm sm:text-base font-bold text-brand-red mt-1">
+                    {results!.summary.maxDrawdownPct}%
+                  </span>
+                </div>
+
+                <div className="bg-black p-3 rounded border border-brand-border">
+                  <span className="block text-[9px] uppercase font-bold text-gray-500 tracking-wider font-mono">Drawdown Duration</span>
+                  <span className="block font-mono text-sm sm:text-base font-bold text-gray-400 mt-1">
+                    {results!.summary.maxDrawdownDurationDays != null ? `${results!.summary.maxDrawdownDurationDays}d` : "—"}
+                  </span>
+                </div>
+
+                <div className="bg-black p-3 rounded border border-brand-border">
+                  <span className="block text-[9px] uppercase font-bold text-gray-500 tracking-wider font-mono">Calmar Ratio</span>
+                  <span className="block font-mono text-sm sm:text-base font-bold text-white mt-1">
+                    {results!.summary.calmar != null ? results!.summary.calmar.toFixed(2) : "—"}
+                  </span>
+                </div>
+              </div>
+            )}
+
             {/* Trades Ledger Table */}
             <div className="border border-brand-border rounded overflow-hidden">
               <table className="w-full text-left border-collapse text-[10px]">

@@ -210,6 +210,13 @@ export interface BacktestResult {
     winningTrades: number;
     losingTrades: number;
     profitFactor: number;
+    // Present only for premium-model strategies; null when <15 trades
+    // (not enough samples for a meaningful Sharpe/Calmar).
+    sharpe?: number | null;
+    maxDrawdownPct?: number;
+    maxDrawdownDurationDays?: number | null;
+    calmar?: number | null;
+    annualizedReturnPct?: number | null;
   };
   trades: Array<{
     id: number;
