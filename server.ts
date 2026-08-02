@@ -64,7 +64,8 @@ async function wsBroadcastQuotes() {
       fetchCandles(asset, exchange, "1m", 1),
       fetchCandles(asset, exchange, "1d", 2),
     ]);
-    const last = candles?.[candles.length - 1];
+    // Weekend/holiday/pre-open: no 1m candle yet — fall back to last 1d close
+    const last = candles?.[candles.length - 1] ?? dayCandles?.[dayCandles.length - 1];
     if (!last?.close) return null;
     const price = last.close;
     const prev = dayCandles?.[dayCandles.length - 2]?.close ?? price;
@@ -1177,11 +1178,14 @@ app.get("/api/market/spot/:symbol", async (req, res) => {
 
     if (SPOT_INDEXES.has(symbol)) {
       // optionchains/.../price does not serve index spots — use latest candles
-      const candles = await fetchCandles(symbol, exchange, "1m", 1);
-      if (!candles || candles.length === 0) throw new Error("No index price from broker");
-      const last = candles[candles.length - 1];
+      const [candles, dayCandles] = await Promise.all([
+        fetchCandles(symbol, exchange, "1m", 1).catch(() => []),
+        fetchCandles(symbol, exchange, "1d", 2).catch(() => []),
+      ]);
+      // Weekend/holiday/pre-open: no 1m candle — fall back to last 1d close
+      const last = candles?.[candles.length - 1] ?? dayCandles?.[dayCandles.length - 1];
+      if (!last?.close) throw new Error("No index price from broker");
       price = last.close;
-      const dayCandles = await fetchCandles(symbol, exchange, "1d", 2);
       const today = dayCandles[dayCandles.length - 1];
       if (today) {
         ohlc = { open: today.open, high: today.high, low: today.low };
