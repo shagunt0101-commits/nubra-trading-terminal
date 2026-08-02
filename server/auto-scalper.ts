@@ -1,6 +1,6 @@
 import { nubraApi, getSessionToken, nubraLogin, fetchOptionSymbol, fetchOptionCandles, fetchCandlesInternal } from "./nubra.js";
 import { calculateRSI, calculateSMA, calculateEMA, calculateMACD, calculateBollingerBands } from "./indicators.js";
-import { toPerBarVolume, daysBackFor } from "./market-data.js";
+import { fetchCandles } from "./market-data.js";
 import { evaluateTrendContinuation, evaluateBBMeanReversal, evaluateRSIReversal, evaluateTrendFollow } from "./strategy-engine.js";
 import { writeFileSync, readFileSync, existsSync, renameSync } from "fs";
 import { join } from "path";
@@ -501,51 +501,13 @@ export class AutoScalper {
   // ── Signal Computation: Strategy-branched ──
 
   private async fetchCandles1m(): Promise<any[]> {
-    // intraDay:true only returns today's candles (~17 by 09:45 IST) — too few for RSI/MACD.
-    // Fetch multi-day 1m history and filter to today's session below.
-    const daysBack = Math.max(1, Math.ceil((1 * 120 * 60 * 1000) / (24 * 60 * 60 * 1000) * 2));
-    const query = {
-      query: [{
-        exchange: this.config.exchange,
-        type: this.config.assetType,
-        values: [this.config.symbol],
-        fields: ["open", "high", "low", "close", "cumulative_volume"],
-        startDate: new Date(Date.now() - daysBack * 24 * 60 * 60 * 1000).toISOString(),
-        endDate: new Date().toISOString(),
-        interval: "1m",
-        intraDay: false,
-        realTime: false,
-      }],
-    };
+    // Delegate to market-data.ts fetchCandles — cache-first (10s TTL shared with WS/
+    // routes, so one broker call per poll window), INDEX-aware (INDEXES set), and
+    // multi-day for RSI/MACD. Removed: the http://localhost:3000 self-fetch fallback.
     let candles: any[] = [];
     try {
-      const hist = await nubraApi.getHistoricalData(query);
-      if (hist?.result?.[0]?.values?.[0]) {
-        const symData = hist.result[0].values[0][this.config.symbol];
-        if (symData?.close) {
-          const volume = toPerBarVolume((symData.cumulative_volume || []).map((p: any) => p.v));
-          candles = symData.close.map((p: any, i: number) => ({
-            ts: p.ts, close: p.v / 100,
-            open: symData.open[i].v / 100, high: symData.high[i].v / 100,
-            low: symData.low[i].v / 100, volume: volume[i] || 0,
-          }));
-        }
-      }
+      candles = await fetchCandles(this.config.symbol, this.config.exchange, "1m", 120);
     } catch (e: any) { logger.warn({ err: e }, "[Scalper] Historical data fetch failed"); }
-    if (candles.length < 20) {
-      try {
-        const res = await fetch(`http://localhost:3000/api/market/historical`, {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ symbol: this.config.symbol, interval: "1m", length: 120, exchange: this.config.exchange }),
-        });
-        if (res.ok) {
-          const json = await res.json();
-          if (Array.isArray(json) && json.length >= 20) {
-            candles = json.map((c: any) => ({ ts: c.ts, close: c.close, open: c.open, high: c.high, low: c.low, volume: c.volume || 0 }));
-          }
-        }
-      } catch (e: any) { logger.warn({ err: e }, "[Scalper] Historical fallback fetch failed"); }
-    }
     // Filter intraday only (UTC 03:45 = IST 09:15). Broker ts is nanoseconds —
     // normalize to ms before comparing against the wall clock, else a ns epoch
     // (~1.7e18) is always >= ms open (~1.7e12) and every stale session passes.
