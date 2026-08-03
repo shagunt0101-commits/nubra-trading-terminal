@@ -32,6 +32,7 @@ interface PersistedState {
   stats: { totalPnl: number; totalWins: number; totalLosses: number };
   dailyPnl?: number;
   mode?: ScalperMode; // persisted so a server restart can resume scanning
+  config?: Partial<ScalperConfig>; // persisted so tuning survives restart
 }
 
 function loadState(): PersistedState {
@@ -111,6 +112,8 @@ export interface ScalperConfig {
   maxConcurrentTrades: number;     // max active trades at once (default 1)
   maxDailyLoss: number;            // max total loss pts per session (default 50)
   maxPositionSizePct: number;      // max position % of available margin (default 20)
+  maxHoldingMinutes: number;       // force-exit a position after N minutes (default 15)
+  entryCutoff: string;             // HH:MM IST — no new entries after this (default "15:20")
   // sma_ema_cross periods (grid-optimized; PGHO promoted 10/30)
   smaPeriod: number;
   emaPeriod: number;
@@ -209,6 +212,8 @@ const DEFAULT_CONFIG: ScalperConfig = {
   maxConcurrentTrades: 1,
   maxDailyLoss: 50,
   maxPositionSizePct: 20,
+  maxHoldingMinutes: 15,
+  entryCutoff: "15:20",
   smaPeriod: 10,
   emaPeriod: 30,
   bbPeriod: 20,
@@ -272,8 +277,11 @@ export class AutoScalper {
   private static readonly CHAIN_CACHE_TTL = 5_000;
 
   constructor(cfg?: Partial<ScalperConfig>) {
-    this.config = { ...DEFAULT_CONFIG, ...INSTRUMENT_DEFAULTS[cfg?.symbol || "NIFTY"], ...cfg };
+    this.loadLeadLagEdges();
     const state = loadState();
+    // Merge persisted config over defaults, then runtime args (route) over both —
+    // so a tuned strategy survives restarts, and an explicit cfg always wins.
+    this.config = { ...DEFAULT_CONFIG, ...INSTRUMENT_DEFAULTS[cfg?.symbol || "NIFTY"], ...(state.config || {}), ...cfg };
     this.trades = state.trades || [];
     this.logs = state.logs || [];
     this.activeTrade = state.activeTrade || null;
@@ -297,6 +305,20 @@ export class AutoScalper {
       this.activeTrade = { ...state.activeTrade, status: "STOPPED" };
       this.log("STATE", "Restores EXIT with open trade — LEFT STOPPED: reconcile position against broker before resuming (see /api/scalper/positions)", { trade: this.activeTrade });
     }
+
+    // Reconcile orphaned OPEN journal entries: any OPEN trade that is not the
+    // active trade was left behind by an earlier restore (STOPPED) or a crash.
+    // It can never be priced again — mark CLOSED/STALE so stats and UI are honest.
+    const activeId = this.activeTrade?.id;
+    const now = Date.now();
+    for (const t of this.trades) {
+      if (t.status === "OPEN" && t.id !== activeId) {
+        t.status = "CLOSED";
+        t.exitTime = now;
+        t.exitReason = "STALE_RESTORE";
+        this.log("WARN", `Reconciled orphaned OPEN trade ${t.id} → CLOSED (STALE_RESTORE): never active on this run`);
+      }
+    }
   }
 
   // Async, debounced: each mutation journaled to state via schedulePersist.
@@ -311,6 +333,7 @@ export class AutoScalper {
       stats: { totalPnl: this.totalPnl, totalWins: this.totalWins, totalLosses: this.totalLosses },
       dailyPnl: this.dailyPnl,
       mode: this.mode,
+      config: this.config,
     };
   }
 
@@ -365,6 +388,7 @@ export class AutoScalper {
   updateConfig(cfg: Partial<ScalperConfig>) {
     this.config = { ...this.config, ...cfg };
     this.log("STATE", `Config updated: ${JSON.stringify(cfg)}`);
+    this.persist();
   }
 
   private pollingInProgress = false;
@@ -450,6 +474,13 @@ export class AutoScalper {
         this.log("STATE", "Market open — resuming SCANNING");
       }
 
+      // Entry cutoff: no NEW entries in the close window (MARKET_CLOSE force-exits
+      // at 15:25, so a fresh entry after the cutoff is a guaranteed forced exit).
+      // Exits keep running — only signal/entry generation stops.
+      const cutoff = (this.config.entryCutoff || "15:20").split(":").map(Number);
+      const cutoffNum = (cutoff[0] ?? 0) * 100 + (cutoff[1] ?? 0);
+      const entryBlocked = timeNum >= cutoffNum;
+
       // 3. Fetch NIFTY spot price
       let spot: number;
       try {
@@ -490,9 +521,19 @@ export class AutoScalper {
 
       // 5. Compute signal
       if (this.mode === "SCANNING") {
+        // No new entries after the cutoff — exits continue in the close window.
+        if (entryBlocked) {
+          this.log("SIGNAL", `Entry cutoff ${this.config.entryCutoff} passed — no new entries, exits only`);
+          return;
+        }
         const signal = await this.computeSignal(spot);
         if (!signal) return;
         this.signalCount++;
+
+        // Lead-lag edge boost BEFORE the confidence gate: a signal on an edge
+        // strike must be able to cross the threshold. (Boosting inside
+        // placeEntry never helped — a sub-threshold signal never got there.)
+        this.applyLeadLagBoost(signal);
 
         if (signal.direction === "NEUTRAL" || signal.confidence < this.config.confidenceThreshold) {
           this.log("SIGNAL", `Skip — confidence ${signal.confidence}% < ${this.config.confidenceThreshold}%`, { signal });
@@ -952,6 +993,25 @@ export class AutoScalper {
 
   // ── Order Placement ──────────────────────────────────────
 
+  private leadLagEdges: Record<string,number> = {};
+  private loadLeadLagEdges() {
+    try {
+      const filePath = join(process.cwd(), "leadlag_edges.json");
+      const raw = readFileSync(filePath, "utf-8");
+      this.leadLagEdges = JSON.parse(raw);
+      logger.info({ path: filePath, edges: Object.keys(this.leadLagEdges).length }, "[Scalper] Lead-lag edges loaded");
+    } catch { this.leadLagEdges = {}; }
+  }
+  /** Lead-lag edge confidence boost (CE only — edge data is CE→CE; PE inverted). */
+  private applyLeadLagBoost(signal: ScalperSignal) {
+    if (signal.optType === "CE" && signal.targetStrike && this.leadLagEdges[signal.targetStrike]) {
+      const edge = this.leadLagEdges[signal.targetStrike];
+      const boost = Math.min(10, edge / 2);
+      signal.confidence = Math.min(100, (signal.confidence ?? 0) + boost);
+      this.log("STATE", `Lead-lag edge ${edge}% on strike ${signal.targetStrike} → confidence boosted to ${signal.confidence}`);
+    }
+  }
+
   private async placeEntry(signal: ScalperSignal) {
     try {
       if (this.activeTrade && this.activeTrade.status === "OPEN") return;
@@ -976,7 +1036,10 @@ export class AutoScalper {
           : Math.round(signal.premium * (1 + this.config.premiumTargetPct / 100) * 100) / 100
       );
 
-      // Paper mode: skip broker order
+      // Lead-lag boost already applied in poll() before the confidence gate;
+      // placeEntry must not re-apply it (would double-boost the log and mutate
+      // confidence twice for signals that reached here).
+
       if (this.config.paperMode) {
         const trade: TradeRecord = {
           id: `T${Date.now()}`,
@@ -1087,22 +1150,21 @@ export class AutoScalper {
       const candles = await this.fetchCandles1m().catch(() => null);
       const closes = candles ? candles.map(c => c.close) : [];
 
-      if (this.config.paperMode) {
-        const spotChg = spot - trade.entrySpot;
-        currentPremium = trade.entryPremium + (trade.optType === "CE" ? 1 : -1) * 0.6 * spotChg;
-        currentPremium = Math.max(currentPremium, trade.entryPremium * 0.15);
-      } else {
-        try {
-          const optChain = await this.getCachedChain();
-          const chain = optChain?.chain || optChain;
-          const optList = trade.optType === "CE" ? chain?.ce || [] : chain?.pe || [];
-          const match = optList.find((o: any) => Math.round((o.sp || 0) / 100) === trade.strike);
-          if (match?.ltp) currentPremium = match.ltp / 100;
-        } catch (e: any) { logger.warn({ err: e }, "[Scalper] Premium fetch in exit failed"); }
-      }
+      // Prefer real chain LTP in BOTH paper and live — paper exits must price
+      // off the market, not a synthetic spot model (phantom exits).
+      // Track presence with a flag: real LTP legitimately equal to entryPremium
+      // must never be mistaken for "LTP missing" and replaced by the model.
+      let ltpFound = false;
+      try {
+        const optChain = await this.getCachedChain();
+        const chain = optChain?.chain || optChain;
+        const optList = trade.optType === "CE" ? chain?.ce || [] : chain?.pe || [];
+        const match = optList.find((o: any) => Math.round((o.sp || 0) / 100) === trade.strike);
+        if (match?.ltp) { currentPremium = match.ltp / 100; ltpFound = true; }
+      } catch (e: any) { logger.warn({ err: e }, "[Scalper] Premium fetch in exit failed"); }
 
-      // If LTP unavailable, model premium via delta (0.6) with theta floor
-      if (currentPremium <= 0 || currentPremium === trade.entryPremium) {
+      // If LTP genuinely absent, model premium via delta (0.6) with theta floor
+      if (!ltpFound || currentPremium <= 0) {
         const spotChg = spot - trade.entrySpot;
         currentPremium = trade.entryPremium + (trade.optType === "CE" ? 1 : -1) * 0.6 * spotChg;
         currentPremium = Math.max(currentPremium, trade.entryPremium * 0.15);
@@ -1125,6 +1187,12 @@ export class AutoScalper {
 
   private async checkStandardExit(trade: TradeRecord, currentPremium: number) {
     const phase = this.config.exitMode === "phase" || this.config.exitStrategy === "option_rsi_mr";
+
+    // Max holding duration: a 1m scalper position must not ride for hours.
+    if (this.config.maxHoldingMinutes > 0 && Date.now() - trade.entryTime > this.config.maxHoldingMinutes * 60_000) {
+      await this.exitPosition(currentPremium, `MAX_HOLD_${this.config.maxHoldingMinutes}m`);
+      return;
+    }
 
     if (phase) {
       // ── Phase mode (option_rsi_mr parity): SL → BE-lock → 80% trail ──
@@ -1188,6 +1256,12 @@ export class AutoScalper {
   private async checkOptionRsiMrExit(trade: TradeRecord, currentPremium: number, closes: number[], spot: number) {
     const entry = trade.entryPremium;
     const pnlPts = currentPremium - entry;
+
+    // Max holding duration (same as standard path)
+    if (this.config.maxHoldingMinutes > 0 && Date.now() - trade.entryTime > this.config.maxHoldingMinutes * 60_000) {
+      await this.exitPosition(currentPremium, `MAX_HOLD_${this.config.maxHoldingMinutes}m`);
+      return;
+    }
 
     // ── Phase 1: initial SL/target ──
     if (!trade.phase1TargetHit) {
