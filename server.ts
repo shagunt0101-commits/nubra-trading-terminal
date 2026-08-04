@@ -15,6 +15,8 @@ import { fetchCandles } from "./server/market-data.js";
 import { runBacktest, PREMIUM_STRATEGIES } from "./server/backtest-engine.js";
 import { computeRiskMetrics } from "./server/risk-metrics.js";
 import { scalper } from "./server/scalper-instance.js";
+import { startTickRecorder, stopTickRecorder, currentTickFile } from "./server/tick-data.js";
+import orderflowRouter from "./server/routes/orderflow.ts";
 import logger from "./server/logger.js";
 import { validateEnv } from "./server/env.js";
 
@@ -130,7 +132,9 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
   res.status(500).json({ success: false, error: err?.message || "Internal server error" });
 });
 
-// Auth middleware — requires valid broker session for trading endpoints
+// Orderflow predict route
+app.use("/api/orderflow", orderflowRouter);
+
 function requireAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
   const token = getSessionToken();
   if (!token) {
@@ -1294,6 +1298,16 @@ app.post("/api/scalper/config", (req, res) => {
   res.json({ success: true, config: scalper.getConfig() });
 });
 
+// ── Live tick recorder ─────────────────────────────────────
+app.post("/api/tick/start", (req, res) => {
+  startTickRecorder();
+  res.json({ success: true, file: currentTickFile() });
+});
+app.post("/api/tick/stop", (req, res) => {
+  stopTickRecorder();
+  res.json({ success: true });
+});
+
 // Global Market Sentiment — real data from Yahoo Finance
 app.get("/api/global/sentiment", async (req, res) => {
   try {
@@ -1315,6 +1329,7 @@ async function startServer() {
     app.use(vite.middlewares);
     server.listen(PORT, "0.0.0.0", () => {
       logger.info(`[Terminal] Dev server started on http://0.0.0.0:${PORT}`);
+      startTickRecorder();
     });
   } else if (!process.env.VERCEL) {
     const distPath = path.resolve("dist");
@@ -1324,6 +1339,7 @@ async function startServer() {
     });
     server.listen(PORT, "0.0.0.0", () => {
       logger.info(`[Terminal] Server started on http://0.0.0.0:${PORT}`);
+      startTickRecorder();
     });
   }
 }

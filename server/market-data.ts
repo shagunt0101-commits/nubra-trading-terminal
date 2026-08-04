@@ -54,7 +54,7 @@ export async function fetchCandles(symbol: string, exchange: string, interval: s
   const startDate = new Date(today.getTime() - daysBack * 24 * 60 * 60 * 1000).toISOString();
   const endDate = today.toISOString();
 
-  const query = { query: [{ exchange, type: resolveAssetType(symbol), values: [symbol], fields: ["open", "high", "low", "close", "cumulative_volume"], startDate, endDate, interval: brokerInterval, intraDay: false, realTime: false }] };
+  const query = { query: [{ exchange, type: resolveAssetType(symbol), values: [symbol], fields: ["open", "high", "low", "close", "cumulative_volume"], startDate, endDate, interval: brokerInterval, intraDay: interval.includes("m"), realTime: false }] };
   let candles: any[] = [];
   try {
     const data = await nb.nubraApi.getHistoricalData(query);

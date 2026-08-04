@@ -112,10 +112,14 @@ export class NubraWsClient {
   private connected = false;
   private shouldRun = false;
   private instIds: number[] = [];
+  private refSymbols = new Map<number, string>();
   private onBookCb: ((snap: OrderBookSnapshot) => void) | null = null;
 
   /** Start the persistent connection + orderbook subscription. */
-  start(instIds: number[] = [], onOrderbook?: (snap: OrderBookSnapshot) => void) {
+  start(instIds: number[] = [], onOrderbook?: (snap: OrderBookSnapshot) => void, refAssetNames: Record<number, string> = {}) {
+    if (Object.keys(refAssetNames).length) {
+      this.refSymbols = new Map(Object.entries(refAssetNames).map(([k, v]) => [Number(k), v]));
+    } // else preserve refs already populated by resolveRefIds()
     this.instIds = instIds;
     this.onBookCb = onOrderbook ?? null;
     this.shouldRun = true;
@@ -136,6 +140,11 @@ export class NubraWsClient {
 
   isConnected() {
     return this.connected;
+  }
+
+  /** Option ticker per ref_id (from resolveRefIds) — for REST parity calls. */
+  symbolForRefId(refId: number): string {
+    return this.refSymbols.get(refId) || "";
   }
 
   private connect() {
@@ -234,8 +243,11 @@ export class NubraWsClient {
    */
   async verifyAgainstRest(refId: number, symbol: string) {
     try {
-      const rest = await nubraApi.getCurrentPrice(symbol, "NSE");
-      logger.info({ rest, refId }, "[NubraWS] REST quote snapshot (for WS parity check)");
+      // parity must compare the same option: refId → its option ticker, not the
+      // underlying index (index REST price is ~24.6k, option premium is ~60)
+      const optSymbol = this.symbolForRefId(refId) || symbol;
+      const rest = await nubraApi.getCurrentPrice(optSymbol, "NSE");
+      logger.info({ rest, refId, optSymbol }, "[NubraWS] REST quote snapshot (for WS parity check)");
     } catch (e: any) {
       logger.warn({ err: e.message }, "[NubraWS] verifyAgainstRest failed");
     }
@@ -246,20 +258,32 @@ export class NubraWsClient {
    *  the nearest strikes around spot, or [] on failure. */
   async resolveRefIds(symbol: string, spot: number, count = 3): Promise<number[]> {
     try {
-      const date = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+      // ISO date (YYYY-MM-DD) — PROD rejects the compact YYYYMMDD form
+      const date = new Date().toISOString().slice(0, 10);
+      const todayInt = parseInt(date.replace(/-/g, ""), 10);
       const data = await nubraApi.getInstruments(date, "NSE");
       const rows: any[] = data?.refdata || [];
-      const matches = rows
-        .filter(
-          (r) =>
-            r.stock_name === symbol &&
-            r.asset === "OPTION" &&
-            Math.abs((r.strike_price || 0) - spot) <= 200
-        )
-        .map((r) => r.ref_id)
+
+      // refdata rows: asset=underlying ("NIFTY"), stock_name=full option symbol
+      // ("NIFTY2680429350CE"), strike_price in paise (÷100 for rupees),
+      // derivative_type="OPT", expiry=YYYYMMDD int.
+      const options = rows.filter((r) => r.asset === symbol && r.derivative_type === "OPT" && r.expiry >= todayInt);
+      if (!options.length) {
+        logger.warn({ symbol }, "[NubraWS] No option rows in refdata");
+        return [];
+      }
+      // nearest expiry first, then strikes nearest ATM spot
+      options.sort((a: any, b: any) => a.expiry - b.expiry);
+      const nearestExpiry = options[0].expiry;
+      const near = options
+        .filter((r) => r.expiry === nearestExpiry && Math.abs((r.strike_price || 0) / 100 - spot) <= 200)
+        .sort((a: any, b: any) => Math.abs((a.strike_price || 0) / 100 - spot) - Math.abs((b.strike_price || 0) / 100 - spot))
         .slice(0, count);
-      logger.info({ symbol, spot, matches }, "[NubraWS] Resolved ref_ids");
-      return matches;
+      // remember the option asset_name per ref_id — WS frames carry only ref_id,
+      // but REST quote parity needs the option ticker, not the underlying index
+      for (const r of near) this.refSymbols.set(r.ref_id, r.stock_name);
+      logger.info({ symbol, spot, nearestExpiry, near: near.map((r: any) => ({ ref: r.ref_id, n: r.stock_name, sp: r.strike_price / 100 })) }, "[NubraWS] Resolved ref_ids");
+      return near.map((r: any) => r.ref_id);
     } catch (e: any) {
       logger.warn({ err: e.message }, "[NubraWS] resolveRefIds failed");
       return [];
