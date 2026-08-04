@@ -1,5 +1,5 @@
 import { nubraApi, getSessionToken, nubraLogin, fetchOptionSymbol, fetchOptionCandles, fetchCandlesInternal } from "./nubra.js";
-import { calculateRSI, calculateSMA, calculateEMA, calculateMACD, calculateBollingerBands, calculateADX } from "./indicators.js";
+import { calculateRSI, calculateSMA, calculateEMA, calculateMACD, calculateBollingerBands, calculateADX, calculateATR } from "./indicators.js";
 import { fetchCandles } from "./market-data.js";
 import { evaluateTrendContinuation, evaluateBBMeanReversal, evaluateRSIReversal, evaluateTrendFollow } from "./strategy-engine.js";
 import { readFileSync, existsSync } from "fs";
@@ -124,6 +124,12 @@ export interface ScalperConfig {
   // 0 = disabled. Nonzero = ADX threshold above which +DI/-DI decides direction
   // (S2 mean-reverts, so it may only enter WITH the trend).
   trendGateAdx: number;
+  // Higher-TF support/resistance zones (fractal pivots). A signal entering a
+  // capped zone (BUY_CE into resistance / BUY_PE into support) is blocked;
+  // a signal at the opposite zone is reversal-candidate and boosted.
+  srEnabled: boolean;
+  srTimeframe: string;  // "15m" (default) | "1h" — zone candles
+  srZonePct: number;    // half-width of each zone, % of price (default 0.15)
 }
 
 export interface ScalperSignal {
@@ -225,6 +231,9 @@ const DEFAULT_CONFIG: ScalperConfig = {
   bbPeriod: 20,
   bbStdDev: 2,
   trendGateAdx: 0,  // 0 = trend gate disabled (default preserves existing behavior)
+  srEnabled: false, // S/R zone gate — default off (opt-in, preserves behavior)
+  srTimeframe: "15m",
+  srZonePct: 0.15,
 };
 
 // Per-instrument overrides — each instrument's risk profile (volatility, premium
@@ -624,6 +633,122 @@ export class AutoScalper {
     return { trend: "none", adx: last, plusDi: plus, minusDi: minus };
   }
 
+  /**
+   * Higher-TF support/resistance zones — fractal pivot points on 15m/1h candles.
+   *
+   * A level must be touched >= 2 times (confirmation) and survive an ATR filter
+   * (>= 0.5 ATR(14) of the higher TF, so noise wiggles don't count as levels).
+   * Each level is a zone [level - zonePct%, level + zonePct%]. A BUY_CE signal
+   * firing inside a resistance zone (or BUY_PE inside support) is capped —
+   * fading INTO the level is where scalps die. A BUY_CE at support (or BUY_PE
+   * at resistance) is a reversal candidate — that's the natural S2 trade.
+   *
+   * Backtester keeps its own copy (server/backtest-engine.ts) — run S/R sweeps
+   * there; this gate only ships to live paper/live.
+   */
+  private srZonesCache: { data: { levels: { price: number; touches: number; kind: "S" | "R" }[]; tf: string }; ts: number } | null = null;
+  private static readonly SR_CACHE_TTL = 60_000;
+
+  // Seam for tests — srLevels routes through this instead of the module import.
+  private async srFetchCandles(tf: string, count: number): Promise<any[]> {
+    return fetchCandles(this.config.symbol, this.config.exchange, tf, count);
+  }
+
+  private async srLevels(): Promise<{ price: number; touches: number; kind: "S" | "R" }[]> {
+    const tf = this.config.srTimeframe || "15m";
+    if (this.srZonesCache && this.srZonesCache.data.tf === tf && Date.now() - this.srZonesCache.ts < AutoScalper.SR_CACHE_TTL) {
+      return this.srZonesCache.data.levels;
+    }
+    // ~7 trading days of higher-TF candles (96 15m bars / 26 1h bars per day)
+    const count = tf === "1h" ? 130 : 400;
+    let candles: any[] = [];
+    try {
+      candles = await this.srFetchCandles(tf, count);
+    } catch (e: any) { logger.warn({ err: e }, "[Scalper] S/R candles fetch failed"); }
+    if (candles.length < 40) { this.srZonesCache = { data: { levels: [], tf }, ts: Date.now() }; return []; }
+
+    const step = this.config.strikeStep || 50;
+    const atrArr = calculateATR(candles as any, 14);
+    const atr = atrArr[atrArr.length - 1];
+    if (!atr || atr <= 0) { this.srZonesCache = { data: { levels: [], tf }, ts: Date.now() }; return []; }
+    const minAtr = atr * 0.5;
+
+    const pivots: { price: number; t: "H" | "L" }[] = [];
+    const len = candles.length;
+    // Fractal pivot: bar is a local max/min over the 2 neighbors each side.
+    for (let i = 2; i < len - 2; i++) {
+      const c = candles[i];
+      const prev2 = candles[i - 1], prev1 = candles[i - 2], next1 = candles[i + 1], next2 = candles[i + 2];
+      const isHigh = c.high > prev1.high && c.high > prev2.high && c.high > next1.high && c.high > next2.high;
+      const isLow = c.low < prev1.low && c.low < prev2.low && c.low < next1.low && c.low < next2.low;
+      if (isHigh) pivots.push({ price: c.high, t: "H" });
+      if (isLow) pivots.push({ price: c.low, t: "L" });
+    }
+    if (pivots.length < 2) { this.srZonesCache = { data: { levels: [], tf }, ts: Date.now() }; return []; }
+
+    // Cluster pivots within half-zone into levels; a cluster with >= 2 pivots is
+    // a confirmed level. Kind = majority pivot type (highs → resistance, lows →
+    // support) — never inferred from price position.
+    const zoneHalf = (this.config.srZonePct / 100) * (candles[len - 1].close || 25000);
+    const levels: { price: number; touches: number; kind: "S" | "R" }[] = [];
+    const used = new Array(pivots.length).fill(false);
+    for (let i = 0; i < pivots.length; i++) {
+      if (used[i]) continue;
+      const cluster: typeof pivots = [];
+      for (let j = 0; j < pivots.length; j++) {
+        if (used[j]) continue;
+        if (Math.abs(pivots[i].price - pivots[j].price) <= zoneHalf) { cluster.push(pivots[j]); used[j] = true; }
+      }
+      const sum = cluster.reduce((a, p) => a + p.price, 0);
+      const avg = sum / cluster.length;
+      const highs = cluster.filter(p => p.t === "H").length;
+      const kind: "S" | "R" = highs > cluster.length / 2 ? "R" : "S";
+      if (cluster.length >= 2 && avg > 0) levels.push({ price: Math.round(avg / step) * step, touches: cluster.length, kind });
+    }
+
+    // Drop levels with price wicks (no candle range overlap) — only keep those
+    // that traded near the level (price within 0.5*ATR of at least one candle's
+    // high/low), so a level is a real reaction point.
+    const kept: typeof levels = [];
+    for (const lv of levels) {
+      const reacted = candles.some(c =>
+        Math.abs(c.high - lv.price) <= atr * 0.5 || Math.abs(c.low - lv.price) <= atr * 0.5
+      );
+      if (reacted) kept.push(lv);
+    }
+    kept.sort((a, b) => a.price - b.price);
+    this.srZonesCache = { data: { levels: kept, tf }, ts: Date.now() };
+    return kept;
+  }
+
+  private async srGate(spot: number, isBull: boolean, reasons: string[]): Promise<{ action: "block" | "boost" | "none"; level?: string }> {
+    if (!this.config.srEnabled) return { action: "none" };
+    const levels = await this.srLevels();
+    if (!levels.length) return { action: "none" };
+    // zone + half a strike step: levels are quantized to the strike step, so a
+    // spot one quantization away from the level still sits ON it.
+    const zoneHalf = (this.config.srZonePct / 100) * spot + (this.config.strikeStep || 50) * 0.5;
+    const r = levels.find(l => Math.abs(l.price - spot) <= zoneHalf && l.kind === "R");
+    const s = levels.find(l => Math.abs(l.price - spot) <= zoneHalf && l.kind === "S");
+    if (isBull && r) {
+      reasons.push(`S/R: buying into resistance ${r.price} (x${r.touches})`);
+      return { action: "block", level: `resistance ${r.price}` };
+    }
+    if (!isBull && s) {
+      reasons.push(`S/R: selling into support ${s.price} (x${s.touches})`);
+      return { action: "block", level: `support ${s.price}` };
+    }
+    if (isBull && s) {
+      reasons.push(`S/R: reversal at support ${s.price} (x${s.touches})`);
+      return { action: "boost", level: `support ${s.price}` };
+    }
+    if (!isBull && r) {
+      reasons.push(`S/R: reversal at resistance ${r.price} (x${r.touches})`);
+      return { action: "boost", level: `resistance ${r.price}` };
+    }
+    return { action: "none" };
+  }
+
   private async computeS2(spot: number, candles: any[], closes: number[]): Promise<ScalperSignal | null> {
     const rsi = calculateRSI(closes, 14);
     const macd = calculateMACD(closes);
@@ -712,6 +837,18 @@ export class AutoScalper {
           atmStrike: this.atmAround(spot), targetStrike: 0, premium: 0, spot, optType: "CE" };
       }
     }
+
+    // Higher-TF S/R zone gate: cap entries into a level, boost reversal trades.
+    try {
+      const sr = await this.srGate(spot, isBull, reasons);
+      if (sr.action === "block") {
+        this.log("SKIP", `S/R gate: ${isBull ? "BUY_CE" : "BUY_PE"} at ${spot} inside ${sr.level} — capped zone, blocking`);
+        return { timestamp: Date.now(), direction: "NEUTRAL", confidence: 0, reasons: [], rsi: rsiVal,
+          macd: macdLine > signalLine ? "Bullish" : "Bearish", vwapAbove, bbWidth, volumeZscore, pcr, ivPercentile,
+          atmStrike: this.atmAround(spot), targetStrike: 0, premium: 0, spot, optType: "CE" };
+      }
+      if (sr.action === "boost") confidence = Math.min(100, confidence + 10);
+    } catch (e: any) { logger.warn({ err: e }, "[Scalper] S/R gate failed"); }
 
     return this.resolveStrikePremium(spot, isBull, confidence, reasons, rsiVal, macdLine > signalLine ? "Bullish" : "Bearish",
       vwapAbove, bbWidth, volumeZscore, pcr, ivPercentile);

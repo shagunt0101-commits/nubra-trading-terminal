@@ -23,6 +23,9 @@ interface ScalperConfig {
   minDelta: number;
   exitStrategy: string;
   trendGateAdx: number;
+  srEnabled: boolean;
+  srTimeframe: string;
+  srZonePct: number;
 }
 
 interface ScalperStats {
@@ -457,6 +460,26 @@ export default function ScalperDashboard({ quotes, premium, fnoInstruments }: { 
                       <option value="25">25 — Standard</option>
                       <option value="30">30 — Strict</option>
                     </select>
+                  ) : editable && k === "srEnabled" ? (
+                    <select
+                      className="flex-1 bg-slate-800 border border-slate-700 rounded px-1 py-0.5 text-[8px] font-mono text-slate-200 focus:outline-none focus:border-indigo-500 cursor-pointer"
+                      value={val}
+                      onChange={e => setEditConfig(prev => ({ ...prev, [k]: e.target.value }))}
+                      title="Higher-TF S/R zone gate: blocks entries INTO a level, boosts reversal trades at a level"
+                    >
+                      <option value="true">True (on)</option>
+                      <option value="false">False (off)</option>
+                    </select>
+                  ) : editable && k === "srTimeframe" ? (
+                    <select
+                      className="flex-1 bg-slate-800 border border-slate-700 rounded px-1 py-0.5 text-[8px] font-mono text-slate-200 focus:outline-none focus:border-indigo-500 cursor-pointer"
+                      value={val}
+                      onChange={e => setEditConfig(prev => ({ ...prev, [k]: e.target.value }))}
+                      title="S/R zone candle timeframe — 15m (default) or 1h"
+                    >
+                      <option value="15m">15m</option>
+                      <option value="1h">1h</option>
+                    </select>
                   ) : editable && k === "exitStrategy" ? (
                     <select
                       className="flex-1 bg-slate-800 border border-slate-700 rounded px-1 py-0.5 text-[8px] font-mono text-slate-200 focus:outline-none focus:border-indigo-500 cursor-pointer"
@@ -485,7 +508,7 @@ export default function ScalperDashboard({ quotes, premium, fnoInstruments }: { 
                 for (const k of Object.keys(editConfig)) {
                   const raw = editConfig[k];
                   const orig = s.config[k as keyof ScalperConfig];
-                  (body as Record<string, unknown>)[k] = k === "paperMode" ? raw === "true" : typeof orig === "number" ? (raw.includes(".") ? parseFloat(raw) : parseInt(raw, 10)) : raw;
+                  (body as Record<string, unknown>)[k] = (k === "paperMode" || k === "srEnabled") ? raw === "true" : typeof orig === "number" ? (raw.includes(".") ? parseFloat(raw) : parseInt(raw, 10)) : raw;
                 }
                 if (Object.keys(body).length) {
                   await fetch("/api/scalper/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
