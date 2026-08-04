@@ -17,10 +17,11 @@
 // Output file feeds the Stage-2 lead-lag validation note. Nothing here places
 // orders — read-only market data.
 // ─────────────────────────────────────────────────────────────────────────────
+import "dotenv/config";
 import fs from "fs";
 import path from "path";
 import logger from "./logger.js";
-import { nubraLogin, nubraApi } from "./nubra.js";
+import { getSessionToken, nubraApi } from "./nubra.js";
 import { NubraWsClient } from "./nubra-ws.js";
 
 const MINUTES = parseInt(process.argv[2] || "30", 10);
@@ -35,12 +36,14 @@ function topOfBookImbalance(snap: { bids: { quantity: number }[]; asks: { quanti
 }
 
 async function main() {
-  const token = await nubraLogin();
+  // Reuse the existing session token (.nubra_session) — the account has no TOTP
+  // enabled, so a fresh nubraLogin() fails. WS + REST both read the loaded token.
+  const token = getSessionToken();
   if (!token) {
-    console.error("Login failed — check NUBRA_* env / .env credentials.");
+    console.error("No session token loaded — run the server once (reuses .nubra_session) first.");
     process.exit(1);
   }
-  console.log(`Logged in. Env=${process.env.NUBRA_ENV || "PROD"} symbol=${SYMBOL} minutes=${MINUTES}`);
+  console.log(`Session token loaded. Env=${process.env.NUBRA_ENV || "PROD"} symbol=${SYMBOL} minutes=${MINUTES}`);
 
   // Resolve spot (current price) + ATM option ref_ids
   let spot = SPOT_OVERRIDE;
@@ -90,13 +93,15 @@ async function main() {
       console.log(`[${frameCount}] refId=${snap.refId} ltp=${snap.ltp} imb=${line.includes('"imb":') ? JSON.parse(line).imb : "?"} b1=${line.includes("bid1") ? JSON.parse(line).bid1?.p : "?"}/${line.includes("ask1") ? JSON.parse(line).ask1?.p : "?"}`);
     }
 
-    // every 60s: REST parity snapshot
+    // every 60s: REST parity snapshot (compare the SAME option: its own ticker)
     if (Date.now() - lastRestCheck > 60_000) {
       lastRestCheck = Date.now();
-      nubraApi.getCurrentPrice(SYMBOL, "NSE")
+      const optSym = client.symbolForRefId(Number(snap.refId)) || SYMBOL;
+      nubraApi.getCurrentPrice(optSym, "NSE")
         .then((rest) => {
+          // option premium in paise, same unit as WS ltp
           const rltp = (rest?.ltp ?? rest?.price ?? rest?.current_price ?? rest?.data?.ltp) ?? 0;
-          console.log(`[PARITY] WS ltp=${snap.ltp} | REST ltp=${Number(rltp) / 100} (diff ${Math.abs(snap.ltp - Number(rltp) / 100)})`);
+          console.log(`[PARITY] ${optSym} refId=${snap.refId} WS ltp=${snap.ltp} | REST ltp=${rltp} (diff ${Math.abs(snap.ltp - rltp)})`);
         })
         .catch((e) => console.warn(`[PARITY] REST fetch failed: ${e.message}`));
     }

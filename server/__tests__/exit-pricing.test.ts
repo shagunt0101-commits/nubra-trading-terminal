@@ -22,7 +22,7 @@ function makeTrade() {
 
 describe("exit pricing: real chain LTP preferred over model", () => {
   it("uses chain LTP when present, even if it equals entryPremium (F1 regression)", async () => {
-    const s = new AutoScalper({ paperMode: true, symbol: "NIFTY" }) as any;
+    const s = new AutoScalper({ paperMode: true, symbol: "NIFTY", exitStrategy: "sl_tp" } as any) as any;
     const trade = makeTrade();
     s.activeTrade = trade;
     // LTP == entryPremium: old code saw `currentPremium === entryPremium`
@@ -42,7 +42,7 @@ describe("exit pricing: real chain LTP preferred over model", () => {
   });
 
   it("falls back to the spot model only when chain LTP is absent", async () => {
-    const s = new AutoScalper({ paperMode: true, symbol: "NIFTY" }) as any;
+    const s = new AutoScalper({ paperMode: true, symbol: "NIFTY", exitStrategy: "sl_tp" } as any) as any;
     const trade = makeTrade();
     s.activeTrade = trade;
     s.getCachedChain = vi.fn().mockResolvedValue(null); // no chain at all

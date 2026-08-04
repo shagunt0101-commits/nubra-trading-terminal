@@ -141,6 +141,7 @@ export interface ScalperSignal {
   optType: OptSide;
   targetPremium?: number;     // fixed target premium (overrides config pct)
   stopLossPremium?: number;   // fixed SL premium (overrides config pct)
+  entryDelta?: number;        // abs(delta) at the resolved strike
 }
 
 export interface TradeLog {
@@ -162,6 +163,7 @@ export interface TradeRecord {
   strike: number;
   expiry: string;
   entryPremium: number;
+  entryDelta?: number;   // abs(delta) at entry — audit the delta rule
   stopLoss: number;
   target: number;
   exitTime?: number;
@@ -281,7 +283,11 @@ export class AutoScalper {
     const state = loadState();
     // Merge persisted config over defaults, then runtime args (route) over both —
     // so a tuned strategy survives restarts, and an explicit cfg always wins.
-    this.config = { ...DEFAULT_CONFIG, ...INSTRUMENT_DEFAULTS[cfg?.symbol || "NIFTY"], ...(state.config || {}), ...cfg };
+    // Only merge persisted config when its symbol matches the requested one:
+    // a stale NIFTY config (e.g. strikeStep 50) must not contaminate a fresh
+    // BANKNIFTY/SENSEX instance.
+    const persistedCfg = (state.config && (!state.config.symbol || state.config.symbol === (cfg?.symbol || "NIFTY"))) ? state.config : {};
+    this.config = { ...DEFAULT_CONFIG, ...INSTRUMENT_DEFAULTS[cfg?.symbol || "NIFTY"], ...persistedCfg, ...cfg };
     this.trades = state.trades || [];
     this.logs = state.logs || [];
     this.activeTrade = state.activeTrade || null;
@@ -902,8 +908,25 @@ export class AutoScalper {
           reasons.push(`strike walked ${targetStrike} (delta ${Math.abs(closer.delta).toFixed(2)})`);
           if (closer.ltp) premium = closer.ltp / 100;
         } else {
-          reasons.push(`delta ${Math.abs(targetOpt.delta || 0).toFixed(2)} < ${this.config.minDelta}`);
-          if (targetOpt.ltp) premium = targetOpt.ltp / 100;
+          // Hard reject: delta below minDelta and no closer qualifying strike.
+          // OTM options that pass minDelta but sit at poor delta must not enter —
+          // the delta rule is a hard gate, not a hint. Walk beyond one step first.
+          let found = false;
+          for (let i = 2; i <= 4; i++) {
+            const walkStrike = isBull ? targetStrike - step * i : targetStrike + step * i;
+            const w = optList.find((o: any) => Math.round((o.sp || 0) / 100) === walkStrike);
+            if (w && typeof w.delta === "number" && Math.abs(w.delta) >= this.config.minDelta) {
+              targetStrike = walkStrike;
+              if (w.ltp) premium = w.ltp / 100;
+              reasons.push(`strike walked ${targetStrike} (delta ${Math.abs(w.delta).toFixed(2)})`);
+              found = true;
+              break;
+            }
+          }
+          if (!found) {
+            this.log("SKIP", `${optType}: delta ${Math.abs(targetOpt.delta || 0).toFixed(2)} < ${this.config.minDelta} at strike ${targetStrike} — no qualifying strike within 4 steps`);
+            premium = NaN; // hard-block
+          }
         }
       } else {
         if (targetOpt?.ltp) premium = targetOpt.ltp / 100;
@@ -925,11 +948,22 @@ export class AutoScalper {
         atmStrike, targetStrike: 0, premium: 0, spot: Math.round(spot * 100) / 100, optType };
     }
 
+    // Capture abs(delta) of the final resolved strike for audit. Re-find it in
+    // the list (walk may have changed targetStrike).
+    let entryDelta: number | undefined;
+    try {
+      const optChain = await this.getCachedChain();
+      const chain = optChain?.chain || optChain;
+      const list = (isBull ? chain?.ce : chain?.pe) || [];
+      const resolved = list.find((o: any) => Math.round((o.sp || 0) / 100) === targetStrike);
+      if (resolved && typeof resolved.delta === "number") entryDelta = Math.abs(resolved.delta);
+    } catch (_) { /* audit field only — ignore */ }
+
     return {
       timestamp: Date.now(), direction: isBull ? "BUY_CE" : "BUY_PE",
       confidence, reasons, rsi, macd, vwapAbove, bbWidth, volumeZscore, pcr, ivPercentile,
       atmStrike, targetStrike, premium: Math.round(premium * 100) / 100,
-      spot: Math.round(spot * 100) / 100, optType,
+      spot: Math.round(spot * 100) / 100, optType, entryDelta,
     };
   }
 
@@ -1052,6 +1086,7 @@ export class AutoScalper {
           strike: signal.targetStrike,
           expiry: "",
           entryPremium: signal.premium,
+          entryDelta: signal.entryDelta,
           stopLoss: stopLossValue,
           target: targetValue,
           status: "OPEN",
@@ -1059,7 +1094,7 @@ export class AutoScalper {
         this.activeTrade = trade;
         this.trades.push(trade);
         this.mode = "EXIT";
-        this.log("ENTRY", `Paper trade ${signal.optType} ${signal.targetStrike} @ ${signal.premium} qty=${qty} | SL=${stopLossValue} TP=${targetValue} mode=${this.config.targetMode} pts=${this.config.premiumTargetPoints}`, { trade });
+        this.log("ENTRY", `Paper trade ${signal.optType} ${signal.targetStrike} @ ${signal.premium} delta=${signal.entryDelta?.toFixed(2) ?? "?"} qty=${qty} | SL=${stopLossValue} TP=${targetValue} mode=${this.config.targetMode} pts=${this.config.premiumTargetPoints}`, { trade });
         return;
       }
 
@@ -1123,6 +1158,7 @@ export class AutoScalper {
         strike: signal.targetStrike,
         expiry: "",
         entryPremium: signal.premium,
+        entryDelta: signal.entryDelta,
         stopLoss: stopLossValue,
         target: targetValue,
         status: "OPEN",
@@ -1131,7 +1167,7 @@ export class AutoScalper {
       this.activeTrade = trade;
       this.trades.push(trade);
       this.mode = "EXIT";
-      this.log("ENTRY", `Bought ${signal.optType} ${signal.targetStrike} @ ${signal.premium} qty=${qty} | SL=${stopLossValue} TP=${targetValue} mode=${this.config.targetMode} pts=${this.config.premiumTargetPoints}`, { trade, brokerRes });
+      this.log("ENTRY", `Bought ${signal.optType} ${signal.targetStrike} @ ${signal.premium} delta=${signal.entryDelta?.toFixed(2) ?? "?"} qty=${qty} | SL=${stopLossValue} TP=${targetValue} mode=${this.config.targetMode} pts=${this.config.premiumTargetPoints}`, { trade, brokerRes });
     } catch (e: any) {
       this.log("ERROR", `Entry error: ${e.message}`);
     }
