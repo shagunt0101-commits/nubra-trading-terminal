@@ -1,5 +1,5 @@
 import { nubraApi, getSessionToken, nubraLogin, fetchOptionSymbol, fetchOptionCandles, fetchCandlesInternal } from "./nubra.js";
-import { calculateRSI, calculateSMA, calculateEMA, calculateMACD, calculateBollingerBands } from "./indicators.js";
+import { calculateRSI, calculateSMA, calculateEMA, calculateMACD, calculateBollingerBands, calculateADX } from "./indicators.js";
 import { fetchCandles } from "./market-data.js";
 import { evaluateTrendContinuation, evaluateBBMeanReversal, evaluateRSIReversal, evaluateTrendFollow } from "./strategy-engine.js";
 import { readFileSync, existsSync } from "fs";
@@ -120,6 +120,10 @@ export interface ScalperConfig {
   // bollinger_band_reversal (PGHO 1m promotion: 20/2.5)
   bbPeriod: number;
   bbStdDev: number;
+  // Trend-confirmation gate: reject signals that fight a confirmed trend.
+  // 0 = disabled. Nonzero = ADX threshold above which +DI/-DI decides direction
+  // (S2 mean-reverts, so it may only enter WITH the trend).
+  trendGateAdx: number;
 }
 
 export interface ScalperSignal {
@@ -220,6 +224,7 @@ const DEFAULT_CONFIG: ScalperConfig = {
   emaPeriod: 30,
   bbPeriod: 20,
   bbStdDev: 2,
+  trendGateAdx: 0,  // 0 = trend gate disabled (default preserves existing behavior)
 };
 
 // Per-instrument overrides — each instrument's risk profile (volatility, premium
@@ -596,6 +601,29 @@ export class AutoScalper {
     return candles.filter(c => c.ts >= 1e15 ? c.ts / 1e6 >= openMs : c.ts >= openMs);
   }
 
+  /**
+   * Trend-confirmation gate (S2, hard block inside computeS2).
+   *
+   * S2 is mean-reverting — RSI/MACD extremes scream "reversal" at exactly the
+   * moment a strong trend keeps going. When ADX confirms a trend (>= trendGateAdx)
+   * and the signal fights it, the entry is blocked. Fade trades become
+   * counter-trend lottery tickets that bleed against a trending day.
+   *
+   * Enabled via config `trendGateAdx` (0 = off). Uses the same 1m candles the
+   * signal already computed — no extra broker call.
+   */
+  private trendDirection(candles: any[]): { trend: "up" | "down" | "none"; adx: number; plusDi: number; minusDi: number } {
+    const thresh = this.config.trendGateAdx;
+    if (!thresh) return { trend: "none", adx: 0, plusDi: 0, minusDi: 0 };
+    if (candles.length < 30) return { trend: "none", adx: 0, plusDi: 0, minusDi: 0 };
+    const adx = calculateADX(candles as any, 14);
+    const last = adx.adx[adx.adx.length - 1];
+    const plus = adx.plusDi[adx.plusDi.length - 1];
+    const minus = adx.minusDi[adx.minusDi.length - 1];
+    if (last >= thresh) return { trend: plus > minus ? "up" : "down", adx: last, plusDi: plus, minusDi: minus };
+    return { trend: "none", adx: last, plusDi: plus, minusDi: minus };
+  }
+
   private async computeS2(spot: number, candles: any[], closes: number[]): Promise<ScalperSignal | null> {
     const rsi = calculateRSI(closes, 14);
     const macd = calculateMACD(closes);
@@ -667,6 +695,22 @@ export class AutoScalper {
       return { timestamp: Date.now(), direction: "NEUTRAL", confidence: 0, reasons: [], rsi: rsiVal,
         macd: macdLine > signalLine ? "Bullish" : "Bearish", vwapAbove, bbWidth, volumeZscore, pcr, ivPercentile,
         atmStrike: this.atmAround(spot), targetStrike: 0, premium: 0, spot, optType: "CE" };
+    }
+
+    // Trend-confirmation gate: S2 mean-reverts, so it may only enter WITH a
+    // confirmed trend. ADX >= trendGateAdx + +DI/-DI direction decides. Fade
+    // entries against confirmed momentum are the losing trades — hard block.
+    // Uses the same candles — no extra broker call.
+    const t = this.trendDirection(candles);
+    if (t.trend !== "none") {
+      const fights = (isBull && t.trend === "down") || (!isBull && t.trend === "up");
+      reasons.push(`trend ${t.trend} ADX ${t.adx.toFixed(1)}`);
+      if (fights) {
+        this.log("SKIP", `Trend gate: ${isBull ? "BUY_CE" : "BUY_PE"} vs ${t.trend} trend (ADX ${t.adx.toFixed(1)} ≥ ${this.config.trendGateAdx}, +DI ${t.plusDi.toFixed(1)}/-DI ${t.minusDi.toFixed(1)}) — counter-trend, blocking`);
+        return { timestamp: Date.now(), direction: "NEUTRAL", confidence: 0, reasons: [], rsi: rsiVal,
+          macd: macdLine > signalLine ? "Bullish" : "Bearish", vwapAbove, bbWidth, volumeZscore, pcr, ivPercentile,
+          atmStrike: this.atmAround(spot), targetStrike: 0, premium: 0, spot, optType: "CE" };
+      }
     }
 
     return this.resolveStrikePremium(spot, isBull, confidence, reasons, rsiVal, macdLine > signalLine ? "Bullish" : "Bearish",

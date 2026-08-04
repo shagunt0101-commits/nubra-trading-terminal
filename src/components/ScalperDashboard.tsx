@@ -22,6 +22,7 @@ interface ScalperConfig {
   targetMode: string;
   minDelta: number;
   exitStrategy: string;
+  trendGateAdx: number;
 }
 
 interface ScalperStats {
@@ -443,6 +444,18 @@ export default function ScalperDashboard({ quotes, premium, fnoInstruments }: { 
                       <option value="bb_mean_reversion">BB Mean Reversion (new)</option>
                       <option value="rsi_reversal">RSI Reversal (new)</option>
                       <option value="sma_ema_trend">SMA/EMA Trend (new)</option>
+                    </select>
+                  ) : editable && k === "trendGateAdx" ? (
+                    <select
+                      className="flex-1 bg-slate-800 border border-slate-700 rounded px-1 py-0.5 text-[8px] font-mono text-slate-200 focus:outline-none focus:border-indigo-500 cursor-pointer"
+                      value={val}
+                      onChange={e => setEditConfig(prev => ({ ...prev, [k]: e.target.value }))}
+                      title="S2 trend filter: ADX threshold. 0=off; >=25 blocks entries that fight a confirmed trend"
+                    >
+                      <option value="0">0 — Off</option>
+                      <option value="20">20 — Weak</option>
+                      <option value="25">25 — Standard</option>
+                      <option value="30">30 — Strict</option>
                     </select>
                   ) : editable && k === "exitStrategy" ? (
                     <select
