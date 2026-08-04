@@ -304,6 +304,14 @@ export default function ScalperDashboard({ quotes, premium, fnoInstruments }: { 
                   {livePnl >= 0 ? "+" : ""}{livePnl.toFixed(0)}
                 </div>
               )}
+              <button
+                onClick={() => doAction("close-trade")}
+                disabled={actionLoading === "close-trade"}
+                className="mt-1.5 flex items-center gap-1 px-2 py-0.5 bg-orange-600/80 hover:bg-orange-500 disabled:opacity-50 text-white rounded-lg text-[9px] font-bold font-mono uppercase cursor-pointer"
+                title="Force close the open position at market premium"
+              >
+                <Square className="h-2.5 w-2.5" /> Close Trade
+              </button>
             </>
           ) : (
             <>

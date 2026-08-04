@@ -113,7 +113,7 @@ export interface ScalperConfig {
   maxDailyLoss: number;            // max total loss pts per session (default 50)
   maxPositionSizePct: number;      // max position % of available margin (default 20)
   maxHoldingMinutes: number;       // force-exit a position after N minutes (default 15)
-  entryCutoff: string;             // HH:MM IST — no new entries after this (default "15:20")
+  entryCutoff: string;             // HH:MM IST — no new entries after this (default "15:30"; index derivatives now trade to 15:40 under SEBI CAS)
   // sma_ema_cross periods (grid-optimized; PGHO promoted 10/30)
   smaPeriod: number;
   emaPeriod: number;
@@ -225,7 +225,7 @@ const DEFAULT_CONFIG: ScalperConfig = {
   maxDailyLoss: 50,
   maxPositionSizePct: 20,
   maxHoldingMinutes: 15,
-  entryCutoff: "15:20",
+  entryCutoff: "15:30",
   smaPeriod: 10,
   emaPeriod: 30,
   bbPeriod: 20,
@@ -433,6 +433,28 @@ export class AutoScalper {
     }, this.config.pollIntervalMs);
   }
 
+  // Force-close the open position at the model premium (paper) or chain LTP
+  // (live), same path checkExit uses. No-op without an active trade.
+  async forceClose(reason = "MANUAL_CLOSE"): Promise<{ closed: boolean; trade?: TradeRecord; premium?: number }> {
+    const trade = this.activeTrade;
+    if (!trade) return { closed: false };
+    let exitPremium: number | null = null;
+    try {
+      const chain = await this.getCachedChain();
+      const optList = (trade.optType === "CE" ? chain?.ce : chain?.pe) || [];
+      const opt = optList.find((o: any) => Math.round((o.sp || 0) / 100) === trade.strike);
+      if (opt?.ltp) exitPremium = opt.ltp / 100;
+    } catch (e: any) { logger.warn({ err: e }, "[Scalper] forceClose chain fetch failed"); }
+    // paper fallback: model premium = entry + (CE ? +1 : −1) * 0.6 * spot change
+    if (exitPremium == null) {
+      const spot = this.lastSpot ?? trade.entrySpot;
+      exitPremium = trade.entryPremium + (trade.optType === "CE" ? 1 : -1) * 0.6 * (spot - trade.entrySpot);
+      exitPremium = Math.max(exitPremium, trade.entryPremium * 0.15);
+    }
+    await this.exitPosition(exitPremium, reason);
+    return { closed: true, trade: this.activeTrade ?? undefined, premium: exitPremium };
+  }
+
   stop(): void {
     if (this.timer) { clearTimeout(this.timer); this.timer = null; }
     this.mode = "STOPPED";
@@ -477,12 +499,13 @@ export class AutoScalper {
         }
       }
 
-      // 2. Check market hours (NSE: 9:15-15:30 IST)
+      // 2. Check market hours (NSE index derivatives: 9:15-15:40 IST since SEBI
+      // CAS 2026-08-03; cash closes 15:30/15:35 — derivatives run 10 min longer)
       const now = new Date();
       const ist = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
       const h = ist.getHours(), m = ist.getMinutes();
       const timeNum = h * 100 + m;
-      if (timeNum < 915 || timeNum > 1530) {
+      if (timeNum < 915 || timeNum > 1540) {
         if (this.mode !== "IDLE") {
           this.log("STATE", "Market closed — pausing scalper");
           this.mode = "IDLE";
@@ -1451,7 +1474,9 @@ export class AutoScalper {
     const now = new Date();
     const ist = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
     const h = ist.getHours(), m = ist.getMinutes();
-    if (h * 100 + m >= 1525) {
+    // SEBI CAS: index derivatives trade to 15:40; force square-off at 15:35
+    // so exit + broker round-trip land before the close.
+    if (h * 100 + m >= 1535) {
       await this.exitPosition(currentPremium, `MARKET_CLOSE`);
       return;
     }
@@ -1553,7 +1578,9 @@ export class AutoScalper {
     const now = new Date();
     const ist = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
     const h = ist.getHours(), m = ist.getMinutes();
-    if (h * 100 + m >= 1525) {
+    // SEBI CAS: index derivatives trade to 15:40; force square-off at 15:35
+    // so exit + broker round-trip land before the close.
+    if (h * 100 + m >= 1535) {
       await this.exitPosition(currentPremium, `MARKET_CLOSE`);
       return;
     }

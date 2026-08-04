@@ -1272,6 +1272,15 @@ app.post("/api/scalper/stop", (req, res) => {
   res.json({ success: true, mode: scalper.getMode() });
 });
 
+app.post("/api/scalper/close-trade", async (req, res) => {
+  try {
+    const r = await scalper.forceClose("MANUAL_CLOSE");
+    res.json({ success: true, closed: r.closed, premium: r.premium, mode: scalper.getMode() });
+  } catch (e: any) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 app.post("/api/scalper/reset", (req, res) => {
   scalper.reset();
   res.json({ success: true, mode: scalper.getMode() });
