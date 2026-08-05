@@ -130,6 +130,9 @@ export interface ScalperConfig {
   srEnabled: boolean;
   srTimeframe: string;  // "15m" (default) | "1h" — zone candles
   srZonePct: number;    // half-width of each zone, % of price (default 0.15)
+  // Directional fade gate: EMA period; reject LONG entries below the EMA and
+  // SHORT entries above it (the 08-05 loss signature — every fade lost). 0 = off.
+  trendGate: number;
 }
 
 export interface ScalperSignal {
@@ -234,6 +237,7 @@ const DEFAULT_CONFIG: ScalperConfig = {
   srEnabled: false, // S/R zone gate — default off (opt-in, preserves behavior)
   srTimeframe: "15m",
   srZonePct: 0.15,
+  trendGate: 0,     // 0 = EMA fade gate off (preserves existing behavior)
 };
 
 // Per-instrument overrides — each instrument's risk profile (volatility, premium
@@ -1227,22 +1231,47 @@ export class AutoScalper {
         return null;
       }
 
-      switch (this.config.strategy) {
-        case "sma_ema_cross":
-          return this.computeSmaEma(spot, candles, closes);
-        case "rsi_overbought_oversold":
-          return this.computeRsi(spot, candles, closes);
-        case "bollinger_band_reversal":
-          return this.computeBB(spot, candles, closes);
-        case "option_rsi_mr":
-          return this.computeOptionRsiMR(spot, candles, closes);
-        case "s2_scalper":
-        default:
-          return this.computeS2(spot, candles, closes);
+      // Directional fade gate (trendGate EMA period): every 08-05 loss was spot
+      // moving AGAINST the option — LONG below a falling EMA, SHORT above a
+      // rising one. Mean-reversion signals at range extremes fight momentum;
+      // block entries on the wrong side of the EMA. Applies to all strategies.
+      // 0 = off.
+      const raw = await this.computeByStrategy(spot, candles, closes);
+      if (raw && this.config.trendGate > 0 && closes.length >= this.config.trendGate) {
+        const ema = calculateEMA(closes, this.config.trendGate)[closes.length - 1];
+        if (ema > 0) {
+          const wantLong = raw.optType === "CE";
+          const lastClose = closes[closes.length - 1];
+          if (wantLong && lastClose < ema) {
+            this.log("SKIP", `TrendGate: BUY_CE below EMA${this.config.trendGate} (${lastClose.toFixed(1)} < ${ema.toFixed(1)}) — fade, blocking`);
+            return null;
+          }
+          if (!wantLong && lastClose > ema) {
+            this.log("SKIP", `TrendGate: BUY_PE above EMA${this.config.trendGate} (${lastClose.toFixed(1)} > ${ema.toFixed(1)}) — fade, blocking`);
+            return null;
+          }
+        }
       }
+      return raw;
     } catch (e: any) {
       this.log("ERROR", `Signal compute error: ${e.message}`);
       return null;
+    }
+  }
+
+  private async computeByStrategy(spot: number, candles: any[], closes: number[]): Promise<ScalperSignal | null> {
+    switch (this.config.strategy) {
+      case "sma_ema_cross":
+        return this.computeSmaEma(spot, candles, closes);
+      case "rsi_overbought_oversold":
+        return this.computeRsi(spot, candles, closes);
+      case "bollinger_band_reversal":
+        return this.computeBB(spot, candles, closes);
+      case "option_rsi_mr":
+        return this.computeOptionRsiMR(spot, candles, closes);
+      case "s2_scalper":
+      default:
+        return this.computeS2(spot, candles, closes);
     }
   }
 

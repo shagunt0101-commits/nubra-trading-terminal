@@ -110,6 +110,18 @@ for (const ct of CT) {
     add(`sma_trend ct${ct} h${mh}`, { ...base("sma_ema_trend", { confidenceThreshold: ct }), ...ex });
   }
 }
+// ── proposed 08-06 fix set: directional gate + tighter hold + tail cutoff ──
+// 08-05 losses were all fades (spot moved AGAINST the option on every loss;
+// 10:38 PE held a 54.6-pt rip → −4173). Test gate EMA9/21, hold 12/18, cutoff 14:15.
+for (const ex of [[12, 18], [18, 18]].map(([mh]) => ({ ...BASE_EXIT, maxHoldBars: mh }))) {
+  for (const g of [0, 9, 21]) {
+    for (const cut of [0, 1415]) {
+      const tag = `s2fix h${ex.maxHoldBars}${g ? ` g${g}` : ""}${cut ? ` c1415` : ""}`;
+      add(tag, { ...base("s2_scalper", { ...(g ? { trendGate: g } : {}), ...(cut ? { entryCutoffMin: cut } : {}) }), ...ex });
+    }
+  }
+}
+
 // entry-param tunings for strategies with knobs (h18 = live parity)
 for (const ex of [18].map(mh => ({ ...BASE_EXIT, maxHoldBars: mh }))) {
   for (const bb of [[15, 2], [20, 2], [20, 2.5], [25, 2]]) {

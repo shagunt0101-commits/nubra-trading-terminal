@@ -35,6 +35,8 @@ export interface BTOpts {
   trailPct?: number;      // phase2/3 trail (live: 0.80)
   phase1TargetPct?: number; // phase1 → phase2 trigger (live: +4pts on ₹100-300 prem)
   sessionCloseMin?: number; // IST hhmm EOD forced exit (live: 1525)
+  trendGate?: number;      // EMA period — reject counter-trend entries (LONG below EMA, SHORT above)
+  entryCutoffMin?: number; // IST hhmm — no NEW entries after (live: 1415; exits still run)
   // instrument context
   instrument: string;
   // parameterized inline strategies (stage-0; defaults preserve legacy behavior)
@@ -276,6 +278,7 @@ export function runBacktest(candles: BTCandle[], opts: BTOpts): BTRun {
     return d.getUTCHours() * 100 + d.getUTCMinutes();
   };
   const signals = precomputeSignals(candles, s, opts);
+  const closes = candles.map(c => c.close);
   // Real ATM option delta ≈ 0.5: premium moves at ~half the spot-model's rate.
   // Held premium = entry + 0.5×(model move), theta-decayed, floored at 0.15×
   // entry (live parity — auto-scalper paper exit keeps the same floor; without
@@ -376,6 +379,17 @@ export function runBacktest(candles: BTCandle[], opts: BTOpts): BTRun {
     // ---- entry: signal on closed candle i, execute at open of i+1 (no lookahead) ----
     if (!signals.long[i] && !signals.short[i] || i + 1 >= candles.length) continue;
     const sig = { dir: signals.long[i] ? ("LONG" as const) : ("SHORT" as const), conf: signals.conf[i] };
+    // Directional gate: reject counter-trend entries (close below EMA → no LONG,
+    // above EMA → no SHORT). Kills fades like 08-05 10:38 (PE at a bounce top).
+    if (opts.trendGate && i >= opts.trendGate - 1) {
+      const ema = calculateEMA(closes, opts.trendGate)[i];
+      if (ema > 0) {
+        if (sig.dir === "LONG" && closes[i] < ema) continue;
+        if (sig.dir === "SHORT" && closes[i] > ema) continue;
+      }
+    }
+    // Session-tail cutoff: no new entries after entryCutoffMin (exits continue)
+    if (opts.entryCutoffMin && istClock(candles[i].ts) >= opts.entryCutoffMin) continue;
     const entryC = candles[i + 1];
     const atm = Math.round(entryC.open / atmStep) * atmStep;
     if (isPremium) {
