@@ -130,9 +130,6 @@ export interface ScalperConfig {
   srEnabled: boolean;
   srTimeframe: string;  // "15m" (default) | "1h" — zone candles
   srZonePct: number;    // half-width of each zone, % of price (default 0.15)
-  // Directional fade gate: EMA period; reject LONG entries below the EMA and
-  // SHORT entries above it (the 08-05 loss signature — every fade lost). 0 = off.
-  trendGate: number;
 }
 
 export interface ScalperSignal {
@@ -228,7 +225,7 @@ const DEFAULT_CONFIG: ScalperConfig = {
   maxDailyLoss: 50,
   maxPositionSizePct: 20,
   maxHoldingMinutes: 15,
-  entryCutoff: "15:30",
+  entryCutoff: "14:15", // validated on 3-day chain-truth (+2866 → +4842); no new entries in tail
   smaPeriod: 10,
   emaPeriod: 30,
   bbPeriod: 20,
@@ -237,7 +234,6 @@ const DEFAULT_CONFIG: ScalperConfig = {
   srEnabled: false, // S/R zone gate — default off (opt-in, preserves behavior)
   srTimeframe: "15m",
   srZonePct: 0.15,
-  trendGate: 0,     // 0 = EMA fade gate off (preserves existing behavior)
 };
 
 // Per-instrument overrides — each instrument's risk profile (volatility, premium
@@ -462,8 +458,18 @@ export class AutoScalper {
     try {
       const chain = await this.getCachedChain();
       const optList = (trade.optType === "CE" ? chain?.ce : chain?.pe) || [];
-      const opt = optList.find((o: any) => Math.round((o.sp || 0) / 100) === trade.strike);
-      if (opt?.ltp) exitPremium = opt.ltp / 100;
+      // Exact held strike, else nearest same-side strike (chain truth over model)
+      const exact = optList.find((o: any) => Math.round((o.sp || 0) / 100) === trade.strike);
+      if (exact?.ltp) exitPremium = exact.ltp / 100;
+      else {
+        let best: any = null, bestDist = Infinity;
+        for (const o of optList) {
+          if (!o?.ltp || o.ltp <= 0) continue;
+          const dist = Math.abs(Math.round((o.sp || 0) / 100) - trade.strike);
+          if (dist < bestDist) { bestDist = dist; best = o; }
+        }
+        if (best) exitPremium = best.ltp / 100;
+      }
     } catch (e: any) { logger.warn({ err: e }, "[Scalper] forceClose chain fetch failed"); }
     // paper fallback: model premium = entry + (CE ? +1 : −1) * 0.6 * spot change
     if (exitPremium == null) {
@@ -1231,28 +1237,7 @@ export class AutoScalper {
         return null;
       }
 
-      // Directional fade gate (trendGate EMA period): every 08-05 loss was spot
-      // moving AGAINST the option — LONG below a falling EMA, SHORT above a
-      // rising one. Mean-reversion signals at range extremes fight momentum;
-      // block entries on the wrong side of the EMA. Applies to all strategies.
-      // 0 = off.
-      const raw = await this.computeByStrategy(spot, candles, closes);
-      if (raw && this.config.trendGate > 0 && closes.length >= this.config.trendGate) {
-        const ema = calculateEMA(closes, this.config.trendGate)[closes.length - 1];
-        if (ema > 0) {
-          const wantLong = raw.optType === "CE";
-          const lastClose = closes[closes.length - 1];
-          if (wantLong && lastClose < ema) {
-            this.log("SKIP", `TrendGate: BUY_CE below EMA${this.config.trendGate} (${lastClose.toFixed(1)} < ${ema.toFixed(1)}) — fade, blocking`);
-            return null;
-          }
-          if (!wantLong && lastClose > ema) {
-            this.log("SKIP", `TrendGate: BUY_PE above EMA${this.config.trendGate} (${lastClose.toFixed(1)} > ${ema.toFixed(1)}) — fade, blocking`);
-            return null;
-          }
-        }
-      }
-      return raw;
+      return this.computeByStrategy(spot, candles, closes);
     } catch (e: any) {
       this.log("ERROR", `Signal compute error: ${e.message}`);
       return null;
@@ -1445,11 +1430,23 @@ export class AutoScalper {
         const optChain = await this.getCachedChain();
         const chain = optChain?.chain || optChain;
         const optList = trade.optType === "CE" ? chain?.ce || [] : chain?.pe || [];
-        const match = optList.find((o: any) => Math.round((o.sp || 0) / 100) === trade.strike);
-        if (match?.ltp) { currentPremium = match.ltp / 100; ltpFound = true; }
+        // Prefer exact held strike, else nearest strike in the SAME side — the
+        // 0.6·Δspot model fabricates premium (15:15 CE recorded +82% while the
+        // real 24500 CE fell 56→43.4 = −22.5%). Chain truth beats model fiction.
+        const exact = optList.find((o: any) => Math.round((o.sp || 0) / 100) === trade.strike);
+        if (exact?.ltp) { currentPremium = exact.ltp / 100; ltpFound = true; }
+        else {
+          let best: any = null, bestDist = Infinity;
+          for (const o of optList) {
+            if (!o?.ltp || o.ltp <= 0) continue;
+            const dist = Math.abs(Math.round((o.sp || 0) / 100) - trade.strike);
+            if (dist < bestDist) { bestDist = dist; best = o; }
+          }
+          if (best) { currentPremium = best.ltp / 100; ltpFound = true; }
+        }
       } catch (e: any) { logger.warn({ err: e }, "[Scalper] Premium fetch in exit failed"); }
 
-      // If LTP genuinely absent, model premium via delta (0.6) with theta floor
+      // Chain genuinely absent (no LTP at all this poll) — model fallback.
       if (!ltpFound || currentPremium <= 0) {
         const spotChg = spot - trade.entrySpot;
         currentPremium = trade.entryPremium + (trade.optType === "CE" ? 1 : -1) * 0.6 * spotChg;
