@@ -58,12 +58,21 @@ const prem = (spot: number, atm: number, opt: "CE" | "PE") => {
   const s = spot * 0.00385;
   return opt === "CE" ? s + 0.6 * d : s - 0.6 * d;
 };
+// Real-chain premium override (backtest-all.ts): map bar-ts → {CE, PE} LTP from
+// tick captures. Null/undefined → falls back to modeled prem(). Engine's own
+// model stays the default so existing sweep behavior is untouched.
+let chainPrem: ((ts: number, opt: "CE" | "PE") => number | null | undefined) | null = null;
+export function setChainPremium(fn: ((ts: number, opt: "CE" | "PE") => number | null | undefined) | null) { chainPrem = fn; }
+function premC(ts: number, spot: number, atm: number, opt: "CE" | "PE"): number {
+  const cp = chainPrem ? chainPrem(ts, opt) : null;
+  return cp != null && cp > 0 ? cp : prem(spot, atm, opt);
+}
 
 // Intra-bar premium range for a candle: CE rises with spot (range = prem at low→high),
 // PE falls with spot (range = prem at high→low).
 function premRange(c: BTCandle, atm: number, opt: "CE" | "PE"): [number, number] {
-  if (opt === "CE") return [prem(c.low, atm, "CE"), prem(c.high, atm, "CE")];
-  return [prem(c.high, atm, "PE"), prem(c.low, atm, "PE")];
+  if (opt === "CE") return [premC(c.ts, c.low, atm, "CE"), premC(c.ts, c.high, atm, "CE")];
+  return [premC(c.ts, c.high, atm, "PE"), premC(c.ts, c.low, atm, "PE")];
 }
 
 // Per-bar theta decay: ATM near-expiry options bleed ~0.5-2% of premium per
@@ -146,8 +155,8 @@ export function precomputeSignals(candles: BTCandle[], s: string, opts: BTOpts):
     // its RSI decorrelates from spot) — a quiet lookahead-ish artifact.
     const atmArr = closes.map(c => Math.round(c / atmStep) * atmStep);
     spotRsi = calculateRSI(closes, 14);
-    ceS = closes.map((c, i) => prem(c, atmArr[i], "CE"));
-    peS = closes.map((c, i) => prem(c, atmArr[i], "PE"));
+    ceS = closes.map((c, i) => premC(candles[i].ts, c, atmArr[i], "CE"));
+    peS = closes.map((c, i) => premC(candles[i].ts, c, atmArr[i], "PE"));
     ceRsi = calculateRSI(ceS, rsiP); peRsi = calculateRSI(peS, rsiP);
   }
   for (let i = 0; i < n; i++) {
@@ -273,7 +282,7 @@ export function runBacktest(candles: BTCandle[], opts: BTOpts): BTRun {
   // it a deep ITM-away move would price premium to zero and grant free exits).
   const heldPrem = (spot: number, entrySpot: number) =>
     Math.max(pos.entryPremium! * 0.15,
-      pos.entryPremium! + (prem(spot, pos.atm, pos.optType!) - prem(entrySpot, pos.atm, pos.optType!)) * 0.5);
+      pos.entryPremium! + (premC(spot ? 0 : 0, spot, pos.atm, pos.optType!) - premC(0, entrySpot, pos.atm, pos.optType!)) * 0.5);
 
   const closeTrade = (exitC: BTCandle, exitBar: number, exitReason: string, exitPremium?: number, exitPriceOverride?: number) => {
     if (!pos) return;
@@ -371,7 +380,7 @@ export function runBacktest(candles: BTCandle[], opts: BTOpts): BTRun {
     const atm = Math.round(entryC.open / atmStep) * atmStep;
     if (isPremium) {
       const opt = sig.dir === "LONG" ? "CE" : "PE";
-      const entryPremium = prem(entryC.open, atm, opt);
+      const entryPremium = premC(entryC.ts, entryC.open, atm, opt);
       const minPrem = opts.maxEntryPremium ?? 600;
       if (entryPremium <= 0 || entryPremium > minPrem) continue;
       // Symmetric premium risk: % target vs % SL (matches live
