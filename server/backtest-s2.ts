@@ -2,6 +2,9 @@
 // Usage: npx tsx server/backtest-s2.ts
 
 import { calculateRSI, calculateMACD, calculateBollingerBands } from "./indicators";
+import os from "os";
+import fs from "fs";
+import path from "path";
 
 interface Candle { ts: number; open: number; high: number; low: number; close: number; volume: number; }
 
@@ -32,6 +35,11 @@ function simExitPremium(entryPremium: number, entrySpot: number, exitSpot: numbe
 }
 
 async function fetchCandles(symbol: string, exchange: string, interval: string, count: number): Promise<Candle[]> {
+  // Local tick-capture backfill first: 3 full sessions of 1m candles recorded
+  // live (%TEMP%\mvf-tick-YYYYMMDD.jsonl) — broker history only goes back 1 day.
+  const fromTicks = loadTickCandles(symbol, interval);
+  if (fromTicks.length >= 40) return fromTicks.slice(-count);
+
   const res = await fetch(`http://localhost:3000/api/market/historical`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -41,6 +49,50 @@ async function fetchCandles(symbol: string, exchange: string, interval: string, 
   return res.json().then(j => Array.isArray(j) ? j.map((c: any) => ({
     ts: c.ts, open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume || 0,
   })) : []);
+}
+
+// Dedupe the rolling 5-candle window each 15s poll wrote into one continuous
+// per-minute series. Candle ts are in nanoseconds (chain ts) → ms = ts/1e6.
+// Non-1m intervals aggregate that minute series (open first, close last,
+// high/low extremes, volume summed) — same bucket semantics as the broker.
+function loadTickCandles(symbol: string, interval: string): Candle[] {
+  const dir = process.env.TMPDIR || process.env.TEMP || os.tmpdir();
+  const days = ["20260803", "20260804", "20260805"];
+  const byTs = new Map<number, Candle>();
+  for (const d of days) {
+    const f = path.join(dir, `mvf-tick-${d}.jsonl`);
+    if (!fs.existsSync(f)) continue;
+    for (const line of fs.readFileSync(f, "utf8").split("\n")) {
+      if (!line) continue;
+      let r: any;
+      try { r = JSON.parse(line); } catch { continue; }
+      if (r.symbol !== symbol || !Array.isArray(r.candle)) continue;
+      for (const c of r.candle) {
+        const ts = Math.round(c.ts / 1e6);
+        if (!byTs.has(ts)) byTs.set(ts, {
+          ts, open: c.open, high: c.high, low: c.low, close: c.close,
+          volume: c.volume || 0,
+        });
+      }
+    }
+  }
+  let mins = [...byTs.values()].sort((a, b) => a.ts - b.ts);
+  if (interval === "1m") return mins;
+  const stepMins = parseInt(interval) || 1;
+  const out: Candle[] = [];
+  for (const c of mins) {
+    const bucket = c.ts - (c.ts % (stepMins * 60_000));
+    const prev = out[out.length - 1];
+    if (prev && prev.ts === bucket) {
+      prev.high = Math.max(prev.high, c.high);
+      prev.low = Math.min(prev.low, c.low);
+      prev.close = c.close;
+      prev.volume += c.volume;
+    } else {
+      out.push({ ...c, ts: bucket });
+    }
+  }
+  return out;
 }
 
 function runS2(candles: Candle[], cfg: BTConfig): BTTrade[] {
@@ -256,7 +308,7 @@ async function main() {
   console.log("╚══════════════════════════════════════════════════════╝");
 
   const configs = [
-    { interval: "1m", length: 375, label: "TIMEFRAME: 1-MINUTE" },
+    { interval: "1m", length: 1200, label: "TIMEFRAME: 1-MINUTE" },
     { interval: "3m", length: 200, label: "TIMEFRAME: 3-MINUTE" },
     { interval: "5m", length: 150, label: "TIMEFRAME: 5-MINUTE" },
     { interval: "15m", length: 75, label: "TIMEFRAME: 15-MINUTE" },
