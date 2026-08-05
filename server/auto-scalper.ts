@@ -412,6 +412,7 @@ export class AutoScalper {
   }
 
   private pollingInProgress = false;
+  private lastPollTick = 0;
 
   async start(): Promise<boolean> {
     if (this.mode === "SCANNING") return true;
@@ -427,8 +428,23 @@ export class AutoScalper {
   private schedulePoll() {
     // Keep chain alive through IDLE (market-closed pause) so it auto-resumes at open
     if (this.mode === "STOPPED" || this.mode === "ERROR") return;
+    // ponytail: single chained timeout, not setInterval — a rejection from poll()
+    // (e.g. re-login failure after overnight session expiry) previously killed the
+    // chain here: the await threw, schedulePoll() never ran, and the scalper froze
+    // silently until server restart. Try/catch + reschedule keeps the loop alive.
     this.timer = setTimeout(async () => {
-      await this.poll();
+      // Watchdog: a poll wedged >3× interval (stuck await, no finally) would
+      // otherwise block the chain forever — force the guard open and retry.
+      const stuckMs = this.config.pollIntervalMs * 3;
+      if (this.pollingInProgress && Date.now() - this.lastPollTick > stuckMs) {
+        this.log("ERROR", `Poll stuck ${Math.round((Date.now() - this.lastPollTick) / 1000)}s — forcing retry`);
+        this.pollingInProgress = false;
+      }
+      try {
+        await this.poll();
+      } catch (e: any) {
+        this.log("ERROR", `Poll loop recovered from: ${e?.message || e}`);
+      }
       this.schedulePoll();
     }, this.config.pollIntervalMs);
   }
@@ -489,6 +505,7 @@ export class AutoScalper {
   private async poll() {
     if (this.pollingInProgress) return;
     this.pollingInProgress = true;
+    this.lastPollTick = Date.now();
     try {
       // 1. Ensure broker session
       if (!getSessionToken()) {
