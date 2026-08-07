@@ -1307,6 +1307,18 @@ app.post("/api/scalper/config", (req, res) => {
   res.json({ success: true, config: scalper.getConfig() });
 });
 
+// ── Named strategy presets (testing) — same handlers as routes/scalper.ts ──
+app.get("/api/scalper/presets", (req, res) => {
+  res.json({ success: true, presets: scalper.listPresets() });
+});
+
+app.post("/api/scalper/preset/apply", (req, res) => {
+  const name = String(req.body?.name || "");
+  const config = scalper.applyPreset(name);
+  if (!config) return res.status(404).json({ success: false, error: "Unknown preset: " + name });
+  res.json({ success: true, config });
+});
+
 // ── Live tick recorder ─────────────────────────────────────
 app.post("/api/tick/start", (req, res) => {
   startTickRecorder();
