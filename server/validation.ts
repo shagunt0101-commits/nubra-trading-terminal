@@ -82,6 +82,8 @@ export const scalperStartSchema = z.object({
 
 export const scalperConfigSchema = z.record(z.string(), z.any());
 
+export const scalperPresetSchema = z.object({ name: z.string().min(1).max(64) });
+
 export const aiAnalyzeSchema = z.object({
   symbol: z.string().min(1),
   strategy: z.string().optional(),

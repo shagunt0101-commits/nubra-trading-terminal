@@ -126,6 +126,8 @@ export default function ScalperDashboard({ quotes, premium, fnoInstruments }: { 
   const [actionError, setActionError] = useState("");
   const [editConfig, setEditConfig] = useState<Record<string, string>>({});
   const [saveMsg, setSaveMsg] = useState("");
+  const [presets, setPresets] = useState<{ name: string; label: string }[]>([]);
+  const [presetName, setPresetName] = useState("");
   const logsContainerRef = useRef<HTMLDivElement>(null);
   const SYMBOL_CONFIG = useMemo(() => buildSymbolConfig(fnoInstruments), [fnoInstruments]);
 
@@ -138,6 +140,17 @@ export default function ScalperDashboard({ quotes, premium, fnoInstruments }: { 
   }, []);
 
   useEffect(() => { fetchStatus(); }, [fetchStatus]);
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch("/api/scalper/presets");
+        if (res.ok) {
+          const data = await res.json();
+          if (data?.presets) setPresets(data.presets);
+        }
+      } catch (_) { /* ignore */ }
+    })();
+  }, []);
   useEffect(() => {
     if (showLogs && logsContainerRef.current) {
       logsContainerRef.current.scrollTop = logsContainerRef.current.scrollHeight;
@@ -248,6 +261,34 @@ export default function ScalperDashboard({ quotes, premium, fnoInstruments }: { 
             <option value="">Exit: same as entry</option>
             <option value="standard">Exit: SL/TP</option>
             <option value="option_rsi_mr">Exit: RSI MR trail</option>
+          </select>
+          <select
+            className="text-[8px] px-1 py-0.5 rounded font-mono bg-slate-800 border border-slate-700 text-indigo-300 focus:outline-none focus:border-indigo-500 cursor-pointer"
+            value={presetName}
+            onChange={async (e) => {
+              const name = e.target.value;
+              setPresetName("");
+              if (!name) return;
+              try {
+                const res = await fetch("/api/scalper/preset/apply", {
+                  method: "POST", headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ name }),
+                });
+                if (res.status === 404) {
+                  setActionError(`preset/apply: preset not found (HTTP 404)`);
+                } else if (res.ok) {
+                  fetchStatus();
+                }
+              } catch (err: unknown) {
+                setActionError(`preset/apply failed: ${err instanceof Error ? err.message : String(err)}`);
+              }
+            }}
+            title="Apply a testing preset"
+          >
+            <option value="">Testing preset…</option>
+            {presets.map(p => (
+              <option key={p.name} value={p.name}>{p.label}</option>
+            ))}
           </select>
           {s.config.paperMode && (
             <span className="text-[9px] px-1.5 py-0.5 rounded font-mono font-bold border border-amber-500/30 bg-amber-500/10 text-amber-400">

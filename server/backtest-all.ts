@@ -14,6 +14,7 @@
 import os from "os";
 import fs from "fs";
 import path from "path";
+import readline from "readline";
 import { runBacktest, setChainPremium, type BTCandle, type BTOpts } from "./backtest-engine.js";
 
 const DIR = process.env.TMPDIR || process.env.TEMP || os.tmpdir();
@@ -22,12 +23,15 @@ const DAYS = (process.argv.slice(2).length ? process.argv.slice(2)
 
 interface ChainRow { ts: number; spot: number; atmCe: number | null; atmPe: number | null; }
 
-export function loadDay(day: string): { candles: BTCandle[]; prem: Map<number, { CE: number; PE: number }> } {
+export async function loadDay(day: string): Promise<{ candles: BTCandle[]; prem: Map<number, { CE: number; PE: number }> }> {
   const f = path.join(DIR, `mvf-tick-${day}.jsonl`);
   const byTs = new Map<number, BTCandle>();
   const prem = new Map<number, { CE: number; PE: number }>();
   let lastSpot = 0, lastCe = 0, lastPe = 0, live = 0, frozen = 0;
-  for (const line of fs.readFileSync(f, "utf8").split("\n")) {
+  // Stream line-by-line: tick files are 0.5 GB; readFileSync whole-file would
+  // hit V8's max-string ceiling (ERR_STRING_TOO_LONG).
+  const rl = readline.createInterface({ input: fs.createReadStream(f, "utf8"), crlfDelay: Infinity });
+  for await (const line of rl) {
     if (!line) continue;
     let r: any;
     try { r = JSON.parse(line); } catch { continue; }
@@ -164,12 +168,12 @@ function runAll(candles: BTCandle[], prem: Map<number, { CE: number; PE: number 
   return { results, reliability };
 }
 
-function main() {
+async function main() {
   if (!DAYS.length) { console.error("No tick files found in " + DIR); process.exit(1); }
   const allCandles: BTCandle[] = [];
   const allPrem = new Map<number, { CE: number; PE: number }>();
   for (const d of DAYS) {
-    const { candles, prem } = loadDay(d);
+    const { candles, prem } = await loadDay(d);
     allCandles.push(...candles);
     for (const [k, v] of prem) allPrem.set(k, v);
   }
@@ -212,4 +216,9 @@ function main() {
   setChainPremium(null);
 }
 
-main();
+// Direct-run only — importing loadDay/chainFn (e.g. a replay script) must not
+// trigger the full sweep; use a main-entry check so the sweep runs only when
+// this file is executed as a script (tsx server/backtest-all.ts).
+if (import.meta.url === `file://${process.argv[1]?.replace(/\\/g, "/")}` || process.argv[1]?.endsWith("backtest-all.ts")) {
+  main();
+}

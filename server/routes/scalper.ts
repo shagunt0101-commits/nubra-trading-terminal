@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { validate, scalperStartSchema, scalperConfigSchema } from "../validation.js";
+import { validate, scalperStartSchema, scalperConfigSchema, scalperPresetSchema } from "../validation.js";
 import { scalper } from "../scalper-instance.js";
 import logger from "../logger.js";
 
@@ -73,6 +73,18 @@ router.get("/trades", (req, res) => {
 router.post("/config", validate(scalperConfigSchema), (req, res) => {
   scalper.updateConfig(req.body);
   res.json({ success: true, config: scalper.getConfig() });
+});
+
+// ── Named strategy presets (testing) ─────────────────────────────
+router.get("/presets", (req, res) => {
+  res.json({ success: true, presets: scalper.listPresets() });
+});
+
+router.post("/preset/apply", validate(scalperPresetSchema), (req, res) => {
+  const { name } = req.body;
+  const config = scalper.applyPreset(name);
+  if (!config) return res.status(404).json({ success: false, error: "Unknown preset: " + name });
+  res.json({ success: true, config });
 });
 
 // ── Trade journal export ──────────────────────────────────────────

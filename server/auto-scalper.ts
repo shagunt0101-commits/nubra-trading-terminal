@@ -268,6 +268,21 @@ const INSTRUMENT_DEFAULTS: Record<string, Partial<ScalperConfig>> = {
   },
 };
 
+// Named strategy presets for A/B testing (added 2026-08-07).
+// Tagged "(testing)" — these are experimental variants; the live strategy
+// (bollinger_band_reversal) is untouched unless a preset is explicitly applied.
+// Merged over the current config at apply time; only keys present are changed.
+const STRATEGY_PRESETS: Array<{ name: string; label: string; cfg: Partial<ScalperConfig> }> = [
+  { name: "trend_cont-testing", label: "Trend Continuation (testing)",
+    cfg: { strategy: "trend_continuation", confidenceThreshold: 50, exitStrategy: "", exitMode: "sl_tp", maxHoldingMinutes: 30, entryCutoff: "14:15", premiumTargetPct: 15, stopLossPct: 50, maxEntryPremium: 600, consecutiveLossLimit: 3, paperMode: true } },
+  { name: "sma_trend-testing", label: "SMA Trend (testing)",
+    cfg: { strategy: "sma_ema_trend", confidenceThreshold: 50, exitStrategy: "", exitMode: "sl_tp", maxHoldingMinutes: 30, entryCutoff: "14:15", premiumTargetPct: 15, stopLossPct: 50, maxEntryPremium: 600, consecutiveLossLimit: 3, paperMode: true, smaPeriod: 20, emaPeriod: 50 } },
+  { name: "sma_cross-testing", label: "SMA Cross (testing)",
+    cfg: { strategy: "sma_ema_cross", confidenceThreshold: 50, exitStrategy: "", exitMode: "sl_tp", maxHoldingMinutes: 30, entryCutoff: "14:15", premiumTargetPct: 15, stopLossPct: 50, maxEntryPremium: 600, consecutiveLossLimit: 3, paperMode: true, smaPeriod: 20, emaPeriod: 50 } },
+  { name: "bb-trendgate-testing", label: "BB + Trend Gate (testing)",
+    cfg: { strategy: "bollinger_band_reversal", confidenceThreshold: 50, exitStrategy: "", exitMode: "sl_tp", maxHoldingMinutes: 30, entryCutoff: "14:15", premiumTargetPct: 15, stopLossPct: 50, maxEntryPremium: 600, consecutiveLossLimit: 3, paperMode: true, trendGateAdx: 25 } },
+];
+
 export class AutoScalper {
   private config: ScalperConfig;
   private mode: ScalperMode = "IDLE";
@@ -409,6 +424,19 @@ export class AutoScalper {
     this.config = { ...this.config, ...cfg };
     this.log("STATE", `Config updated: ${JSON.stringify(cfg)}`);
     this.persist();
+  }
+
+  /** List of named testing presets. */
+  public listPresets() { return STRATEGY_PRESETS.map(p => ({ name: p.name, label: p.label })); }
+
+  /** Apply a named preset (testing tag). Merges its cfg over the CURRENT config,
+   *  leaving anything the preset doesn't set untouched. Returns the applied config. */
+  public applyPreset(name: string): ScalperConfig | null {
+    const preset = STRATEGY_PRESETS.find(p => p.name === name);
+    if (!preset) return null;
+    this.updateConfig(preset.cfg);
+    this.log("STATE", "Preset applied: " + preset.label);
+    return this.config;
   }
 
   private pollingInProgress = false;
