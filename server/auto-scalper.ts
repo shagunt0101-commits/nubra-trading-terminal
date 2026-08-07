@@ -1,7 +1,7 @@
 import { nubraApi, getSessionToken, nubraLogin, fetchOptionSymbol, fetchOptionCandles, fetchCandlesInternal } from "./nubra.js";
 import { calculateRSI, calculateSMA, calculateEMA, calculateMACD, calculateBollingerBands, calculateADX, calculateATR } from "./indicators.js";
 import { fetchCandles } from "./market-data.js";
-import { evaluateTrendContinuation, evaluateBBMeanReversal, evaluateRSIReversal, evaluateTrendFollow } from "./strategy-engine.js";
+import { evaluateRSIReversal, evaluateTrendFollow } from "./strategy-engine.js";
 import { readFileSync, existsSync } from "fs";
 import { writeFile, readFile, rename } from "fs/promises";
 import { join } from "path";
@@ -273,8 +273,6 @@ const INSTRUMENT_DEFAULTS: Record<string, Partial<ScalperConfig>> = {
 // (bollinger_band_reversal) is untouched unless a preset is explicitly applied.
 // Merged over the current config at apply time; only keys present are changed.
 const STRATEGY_PRESETS: Array<{ name: string; label: string; cfg: Partial<ScalperConfig> }> = [
-  { name: "trend_cont-testing", label: "Trend Continuation (testing)",
-    cfg: { strategy: "trend_continuation", confidenceThreshold: 50, exitStrategy: "", exitMode: "sl_tp", maxHoldingMinutes: 30, entryCutoff: "14:15", premiumTargetPct: 15, stopLossPct: 50, maxEntryPremium: 600, consecutiveLossLimit: 3, paperMode: true } },
   { name: "sma_trend-testing", label: "SMA Trend (testing)",
     cfg: { strategy: "sma_ema_trend", confidenceThreshold: 50, exitStrategy: "", exitMode: "sl_tp", maxHoldingMinutes: 30, entryCutoff: "14:15", premiumTargetPct: 15, stopLossPct: 50, maxEntryPremium: 600, consecutiveLossLimit: 3, paperMode: true, smaPeriod: 20, emaPeriod: 50 } },
   { name: "sma_cross-testing", label: "SMA Cross (testing)",
@@ -1228,10 +1226,9 @@ export class AutoScalper {
 
   private evaluateEngineStrategy(candles: any[]) {
     switch (this.config.strategy) {
-      case "trend_continuation":
-        return evaluateTrendContinuation(candles as any, "scalping");
-      case "bb_mean_reversion":
-        return evaluateBBMeanReversal(candles as any);
+      // trend_continuation / bb_mean_reversion removed 2026-08-07 — live-parity
+      // replay (3 days) proved both lose: trend_cont −6.3k (2 blowup days),
+      // bb_mr unvalidated engine-first path. Backtester keeps them for sweeps.
       case "rsi_reversal":
         return evaluateRSIReversal(candles as any);
       case "sma_ema_trend":

@@ -2,7 +2,7 @@
 // through the LIVE scalper's poll semantics (15s cadence, completed-minute candle
 // availability, chain-LTP entries/exits at the resolved strike) so backtest ≈ live.
 //
-// Usage: npx tsx server/live-replay.ts [YYYYMMDD] [--config live|trend_cont|sma_trend|sma_cross]
+// Usage: npx tsx server/live-replay.ts [YYYYMMDD] [--config live|live55|liveold|sma_trend|sma_cross]
 //   day:    default = latest mvf-tick-*.jsonl in %TEMP%
 //   config: default "live" (current live bb config)
 //
@@ -62,7 +62,6 @@ const CONFIGS: Record<string, ReplayCfg> = {
   live55: { name: "live55", strategy: "bollinger_band_reversal", confidenceThreshold: 55, premiumTargetPct: 15, stopLossPct: 50, strikeOffset: 1, minDelta: 0.45, maxEntryPremium: 600, maxHoldingMinutes: 30, entryCutoff: "14:15", bbPeriod: 20, bbStdDev: 2.5, phase: true },
   // 08-05/08-06 actual live config: h18, ct55, option_rsi_mr phase exit (RSI_TRAIL), bbStdDev 2
   liveold: { name: "liveold", strategy: "bollinger_band_reversal", confidenceThreshold: 55, premiumTargetPct: 15, stopLossPct: 50, strikeOffset: 1, minDelta: 0.45, maxEntryPremium: 600, maxHoldingMinutes: 18, entryCutoff: "14:15", bbPeriod: 20, bbStdDev: 2, phase: true },
-  trend_cont: { name: "trend_cont", strategy: "trend_continuation", confidenceThreshold: 50, premiumTargetPct: 15, stopLossPct: 50, strikeOffset: 1, minDelta: 0.45, maxEntryPremium: 600, maxHoldingMinutes: 30, entryCutoff: "14:15" },
   sma_trend: { name: "sma_trend", strategy: "sma_ema_trend", confidenceThreshold: 50, premiumTargetPct: 15, stopLossPct: 50, strikeOffset: 1, minDelta: 0.45, maxEntryPremium: 600, maxHoldingMinutes: 30, entryCutoff: "14:15", smaPeriod: 20, emaPeriod: 50 },
   sma_cross: { name: "sma_cross", strategy: "sma_ema_cross", confidenceThreshold: 50, premiumTargetPct: 15, stopLossPct: 50, strikeOffset: 1, minDelta: 0.45, maxEntryPremium: 600, maxHoldingMinutes: 30, entryCutoff: "14:15", smaPeriod: 20, emaPeriod: 50 },
 };
@@ -170,18 +169,6 @@ function computeSignal(
       if (!isBull && !isBear) return null;
       return { dir: isBull ? "LONG" : "SHORT", conf: 65, reason: isBull ? "BB lower bounce" : "BB upper reject" }; // conf 65 = live computeBB constant
     }
-    case "trend_continuation": {
-      const adx = calculateADXLocal(usable), ema21 = ema(usable.map(c => c.close), 21);
-      const lastIdx = usable.length - 1;
-      if (lastIdx < 1) return null;
-      const lastAdx = adx.adx[lastIdx], lastPdi = adx.plusDi[lastIdx], lastMdi = adx.minusDi[lastIdx];
-      const lastPrice = usable[lastIdx].close, lastEma21 = ema21[lastIdx];
-      const priceDist = Math.abs(lastPrice - lastEma21) / lastEma21 * 100;
-      if (!(lastAdx > 25 && priceDist < 0.5)) return null; // strategy-engine: p=25 scalping, 0.5% EMA-21 proximity
-      if (lastPdi > lastMdi) return { dir: "LONG", conf: 70, reason: "ADX trend + Stoch cross + EMA-21" };
-      if (lastMdi > lastPdi) return { dir: "SHORT", conf: 70, reason: "ADX trend + Stoch cross + EMA-21" };
-      return null; // live strategy-engine also requires Stoch cross (k>d / k<d) — gap: Stoch skipped, ADX+DI only
-    }
     case "sma_ema_trend": {
       const smaP = cfg.smaPeriod ?? 20, emaP = cfg.emaPeriod ?? 50;
       if (closes.length < emaP + 2) return null;
@@ -208,18 +195,6 @@ function computeSignal(
 }
 
 // ── Indicator helpers (local; live uses calculateADX/Stoch — see gap note) ──
-function calculateADXLocal(candles: { high: number; low: number; close: number }[]): { adx: number[]; plusDi: number[]; minusDi: number[] } {
-  const n = candles.length;
-  const closes = candles.map(x => x.close);
-  const tr = candles.map((x, i) => i === 0 ? x.high - x.low : Math.max(x.high - x.low, Math.abs(x.high - closes[i - 1]), Math.abs(x.low - closes[i - 1])));
-  const pDm = candles.map((x, i) => { if (i === 0) return 0; const u = x.high - candles[i - 1].high, d = candles[i - 1].low - x.low; return u > d && u > 0 ? u : 0; });
-  const mDm = candles.map((x, i) => { if (i === 0) return 0; const u = x.high - candles[i - 1].high, d = candles[i - 1].low - x.low; return d > u && d > 0 ? d : 0; });
-  const str = ema(tr, 14), sp = ema(pDm, 14), sm = ema(mDm, 14);
-  const pDi = str.map((t, i) => t > 0 ? (100 * sp[i]) / t : 0);
-  const mDi = str.map((t, i) => t > 0 ? (100 * sm[i]) / t : 0);
-  const dx = pDi.map((p, i) => { const s = p + mDi[i]; return s > 0 ? (Math.abs(p - mDi[i]) / s) * 100 : 0; });
-  return { adx: ema(dx, 14), plusDi: pDi, minusDi: mDi };
-}
 function sma(arr: number[], period: number): number[] {
   const out: number[] = [];
   for (let i = 0; i < arr.length; i++) {
