@@ -1292,12 +1292,24 @@ app.post("/api/scalper/clear-old-trades", (req, res) => {
 });
 
 app.get("/api/scalper/status", (req, res) => {
+  const trades = scalper.getTrades();
+  // Day-wise P&L over ALL trades (IST dates) — the UI shows today + recent days.
+  const dayPnl = new Map<string, { date: string; pnl: number; trades: number; wins: number }>();
+  for (const t of trades) {
+    if (t.status !== "CLOSED" || t.pnl == null) continue;
+    const d = new Date(t.entryTime + 5.5 * 3600_000);
+    const key = d.toISOString().slice(0, 10);
+    const e = dayPnl.get(key) || { date: key, pnl: 0, trades: 0, wins: 0 };
+    e.pnl += t.pnl; e.trades++; if (t.pnl > 0) e.wins++;
+    dayPnl.set(key, e);
+  }
   res.json({
     mode: scalper.getMode(),
     config: scalper.getConfig(),
     stats: scalper.getStats(),
     activeTrade: scalper.getActiveTrade(),
-    trades: scalper.getTrades().slice(-20),
+    trades: trades.slice(-100),
+    dayPnl: [...dayPnl.values()].sort((a, b) => b.date.localeCompare(a.date)),
     logs: scalper.getLogs(30),
   });
 });

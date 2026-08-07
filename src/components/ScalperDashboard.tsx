@@ -83,12 +83,20 @@ interface ScalperLog {
   msg: string;
 }
 
+interface DayPnl {
+  date: string;
+  pnl: number;
+  trades: number;
+  wins: number;
+}
+
 interface ScalperStatus {
   mode: string;
   config: ScalperConfig;
   stats: ScalperStats;
   activeTrade: ActiveTrade | null;
   trades: Trade[];
+  dayPnl?: DayPnl[];
   logs: ScalperLog[];
 }
 
@@ -128,6 +136,7 @@ export default function ScalperDashboard({ quotes, premium, fnoInstruments }: { 
   const [saveMsg, setSaveMsg] = useState("");
   const [presets, setPresets] = useState<{ name: string; label: string }[]>([]);
   const [presetName, setPresetName] = useState("");
+  const [dateFilter, setDateFilter] = useState(""); // "" = all days, else YYYY-MM-DD (IST)
   const logsContainerRef = useRef<HTMLDivElement>(null);
   const SYMBOL_CONFIG = useMemo(() => buildSymbolConfig(fnoInstruments), [fnoInstruments]);
 
@@ -385,6 +394,34 @@ export default function ScalperDashboard({ quotes, premium, fnoInstruments }: { 
         </div>
       </div>
 
+      {/* Day-wise P&L */}
+      {s.dayPnl && s.dayPnl.length > 0 && (
+        <div className="px-3 pb-1">
+          <div className="flex gap-1 flex-wrap">
+            {s.dayPnl.slice(0, 7).map((d) => (
+              <button
+                key={d.date}
+                onClick={() => setDateFilter(dateFilter === d.date ? "" : d.date)}
+                className={`px-1.5 py-0.5 rounded text-[8px] font-mono border cursor-pointer ${
+                  dateFilter === d.date
+                    ? "border-indigo-400 bg-indigo-500/20 text-indigo-200"
+                    : d.pnl >= 0
+                      ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
+                      : "border-red-500/30 bg-red-500/10 text-red-400"
+                }`}
+                title={`${d.trades} trades, ${d.wins}W ${d.trades - d.wins}L — click to filter`}
+              >
+                {d.date.slice(5)} {d.pnl >= 0 ? "+" : ""}{d.pnl.toFixed(0)}
+              </button>
+            ))}
+          </div>
+          <div className="flex justify-between mt-0.5 text-[7px] font-mono text-slate-600">
+            <span>Total ({s.dayPnl.length}d): {s.dayPnl.reduce((a, d) => a + d.pnl, 0) >= 0 ? "+" : ""}{s.dayPnl.reduce((a, d) => a + d.pnl, 0).toFixed(0)}</span>
+            {dateFilter && <span className="text-indigo-400">filtered: {dateFilter}</span>}
+          </div>
+        </div>
+      )}
+
       {/* Trade Log */}
       <div className="px-3 pb-1 flex items-center gap-1">
         <button onClick={() => setShowLogs(!showLogs)}
@@ -399,7 +436,7 @@ export default function ScalperDashboard({ quotes, premium, fnoInstruments }: { 
       </div>
       {showLogs && (
         <div className="px-3 pb-3 max-h-[220px] overflow-y-auto">
-          {s.trades.length === 0 ? (
+          {(dateFilter ? s.trades.filter(t => new Date(t.entryTime + 5.5 * 3600_000).toISOString().slice(0, 10) === dateFilter) : s.trades).length === 0 ? (
             <div className="text-[10px] text-slate-600 font-mono text-center py-4">No trades yet</div>
           ) : (
             <table className="w-full text-[8px] font-mono border-collapse">
@@ -417,7 +454,7 @@ export default function ScalperDashboard({ quotes, premium, fnoInstruments }: { 
                 </tr>
               </thead>
               <tbody>
-                {[...s.trades].reverse().map((t, i) => {
+                {[...s.trades].filter(t => !dateFilter || new Date(t.entryTime + 5.5 * 3600_000).toISOString().slice(0, 10) === dateFilter).reverse().map((t, i) => {
                   const win = (t.pnl || 0) >= 0;
                   const ts = t.entryTime ? new Date(t.entryTime).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata" }) : "";
                   const isActive = t.status === "OPEN";
