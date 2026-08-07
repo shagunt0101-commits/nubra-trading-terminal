@@ -174,6 +174,7 @@ export interface TradeRecord {
   expiry: string;
   entryPremium: number;
   entryDelta?: number;   // abs(delta) at entry — audit the delta rule
+  strategy?: string;     // strategy name at entry (recorded for trade log)
   stopLoss: number;
   target: number;
   exitTime?: number;
@@ -1351,6 +1352,7 @@ export class AutoScalper {
           expiry: "",
           entryPremium: signal.premium,
           entryDelta: signal.entryDelta,
+          strategy: this.config.strategy,
           stopLoss: stopLossValue,
           target: targetValue,
           status: "OPEN",
@@ -1423,6 +1425,7 @@ export class AutoScalper {
         expiry: "",
         entryPremium: signal.premium,
         entryDelta: signal.entryDelta,
+        strategy: this.config.strategy,
         stopLoss: stopLossValue,
         target: targetValue,
         status: "OPEN",

@@ -74,6 +74,7 @@ interface Trade {
   currentPremium?: number;
   stopLoss?: number;
   target?: number;
+  strategy?: string;
 }
 
 interface ScalperLog {
@@ -466,7 +467,10 @@ export default function ScalperDashboard({ quotes, premium, fnoInstruments }: { 
                       <td className="py-1 pr-1 text-slate-500 whitespace-nowrap">{ts}</td>
                       <td className={`py-1 pr-1 font-bold whitespace-nowrap ${t.optType === "CE" ? "text-emerald-400" : "text-red-400"}`}>{t.optType}{t.strike}</td>
                       <td className="py-1 pr-1 text-center text-white">{t.entryPremium?.toFixed(1)}</td>
-                      <td className={`py-1 pr-1 text-center font-bold ${isActive ? "text-cyan-300" : "text-slate-600"}`}>{currentLtp !== null ? currentLtp.toFixed(1) : "—"}</td>
+                      <td className={`py-1 pr-1 text-center font-bold ${isActive ? "text-cyan-300" : "text-slate-600"}`}>
+                        {currentLtp !== null ? currentLtp.toFixed(1) : "—"}
+                        {t.strategy && <div className="text-[6px] font-mono text-slate-500 align-bottom">({t.strategy})</div>}
+                      </td>
                       <td className="py-1 pr-1 text-center text-red-400">{t.stopLoss?.toFixed(1)}</td>
                       <td className="py-1 pr-1 text-center text-emerald-400">{t.target?.toFixed(1)}</td>
                       <td className="py-1 pr-1 text-center text-slate-300">{t.exitPremium?.toFixed(1) || "—"}</td>
