@@ -47,6 +47,7 @@ interface ReplayCfg {
   maxHoldingMinutes: number;
   entryCutoff: string; // "HH:MM" IST
   phase?: boolean; // live: exitStrategy "option_rsi_mr" → 3-phase exit (BE lock + 80% trail)
+  targetModePoints?: boolean; // s2: points-mode SL/TP (entry ± premiumTargetPoints)
   // strategy params
   bbPeriod?: number;
   bbStdDev?: number;
@@ -64,6 +65,12 @@ const CONFIGS: Record<string, ReplayCfg> = {
   liveold: { name: "liveold", strategy: "bollinger_band_reversal", confidenceThreshold: 55, premiumTargetPct: 15, stopLossPct: 50, strikeOffset: 1, minDelta: 0.45, maxEntryPremium: 600, maxHoldingMinutes: 18, entryCutoff: "14:15", bbPeriod: 20, bbStdDev: 2, phase: true },
   sma_trend: { name: "sma_trend", strategy: "sma_ema_trend", confidenceThreshold: 50, premiumTargetPct: 15, stopLossPct: 50, strikeOffset: 1, minDelta: 0.45, maxEntryPremium: 600, maxHoldingMinutes: 30, entryCutoff: "14:15", smaPeriod: 20, emaPeriod: 50 },
   sma_cross: { name: "sma_cross", strategy: "sma_ema_cross", confidenceThreshold: 50, premiumTargetPct: 15, stopLossPct: 50, strikeOffset: 1, minDelta: 0.45, maxEntryPremium: 600, maxHoldingMinutes: 30, entryCutoff: "14:15", smaPeriod: 20, emaPeriod: 50 },
+  // s2_scalper (live DEFAULT_CONFIG parity): ct55, points-mode exit tp4/sl−4,
+  // h15, cut 14:15, 0.6%/0.5% spot premium model for chain-less rows. PCR/IV
+  // gates in computeS2 need OI/iv per strike — recorded rows carry NEITHER
+  // (chain rows: sp/ltp/delta only) → pcr=1 / atmIV=0 / ivPercentile=15 constants
+  // (replay gap 1), trendGateAdx 0 + srEnabled false default = no gates.
+  s2: { name: "s2", strategy: "s2_scalper", confidenceThreshold: 55, premiumTargetPct: 4, stopLossPct: 4, targetModePoints: true, strikeOffset: 1, minDelta: 0.45, maxEntryPremium: 600, maxHoldingMinutes: 15, entryCutoff: "14:15" },
 };
 
 // ── Loader ─────────────────────────────────────────────────
@@ -179,6 +186,62 @@ function computeSignal(
       if (price < smaArr[lastIdx] && closes[lastIdx - 1] >= smaArr[lastIdx - 1] && emaArr[lastIdx] < emaArr[lastIdx - 1]) return { dir: "SHORT", conf: 55, reason: "Price<SMA & EMA down" };
       return null;
     }
+    case "s2_scalper": {
+      // Mirrors live computeS2 (auto-scalper.ts ~828): RSI(14)/MACD score,
+      // BB(20,2) width squeeze/wide, VWAP(20), volume z-score(20). Live reads
+      // PCR/IV from the chain (OI/iv per strike) — recorded rows carry neither,
+      // so pcr=1/atmIV=0/ivPercentile=15 constants (replay gap 1). No strong
+      // signal / below CT / <3 scores → NEUTRAL. Trend gate (trendGateAdx) and
+      // S/R gate (srEnabled) are OFF in live DEFAULT_CONFIG — skipped (gap 2).
+      const rsi = calculateRSI(closes, 14);
+      const macd = calculateMACD(closes);
+      const lastIdx = closes.length - 1;
+      const rsiVal = rsi[lastIdx];
+      const macdLine = macd.macdLine[lastIdx], signalLine = macd.signalLine[lastIdx];
+      const macdHist = macd.histogram[lastIdx], prevMacdHist = macd.histogram[lastIdx - 1] || 0;
+      const reasons: string[] = [];
+      let bullScore = 0, bearScore = 0;
+
+      if (rsiVal < 30) { bullScore += 2; reasons.push(`RSI oversold ${rsiVal.toFixed(1)}`); }
+      else if (rsiVal > 70) { bearScore += 2; reasons.push(`RSI overbought ${rsiVal.toFixed(1)}`); }
+      else if (rsiVal > 50) { bullScore += 1; } else { bearScore += 1; }
+
+      const macdExpanding = macdLine > signalLine && macdHist > prevMacdHist;
+      const macdContracting = macdLine < signalLine && macdHist < prevMacdHist;
+      if (macdExpanding) { bullScore += 2; reasons.push("MACD expanding"); }
+      else if (macdContracting) { bearScore += 2; reasons.push("MACD contracting"); }
+      else if (macdLine > signalLine) { bullScore += 1; } else { bearScore += 1; }
+
+      const bb = calculateBollingerBands(closes, 20, 2);
+      const bbMid = bb.middle[lastIdx];
+      const bbWidth = bbMid > 0 ? ((bb.upper[lastIdx] - bb.lower[lastIdx]) / bbMid) * 100 : 0;
+      const bbSqueeze = bbWidth < 0.5;
+      const vol20 = usable.slice(-20).map(c => c.volume || 0);
+      const sumVol = vol20.reduce((a, b) => a + b, 0);
+      const vwap = sumVol > 0 ? usable.slice(-20).reduce((a, c) => a + c.close * (c.volume || 0), 0) / sumVol : usable[lastIdx].close;
+      const vwapAbove = usable[lastIdx].close > vwap;
+      const volAvg = vol20.reduce((a, b) => a + b, 0) / vol20.length;
+      const volStd = Math.sqrt(vol20.reduce((a, b) => a + (b - volAvg) ** 2, 0) / vol20.length);
+      const volumeZscore = volStd > 0 ? (vol20[vol20.length - 1] - volAvg) / volStd : 0;
+
+      let confidence = (bullScore + bearScore) > 0 ? Math.round((Math.max(bullScore, bearScore) / (bullScore + bearScore)) * 100) : 50;
+      const isBull = bullScore > bearScore;
+      const hasStrongSignal = rsiVal < 30 || rsiVal > 70 || macdExpanding || macdContracting;
+
+      // PCR/IV constants: rows carry no OI/iv (pcr=1, atmIV=0, ivPercentile=15)
+      const pcr = 1, atmIV = 0, ivPercentile = 15;
+      if (pcr > 1.2) { bearScore += 1; }
+      else if (pcr < 0.8) { bullScore += 1; }
+      else { bullScore += 1; bearScore += 1; }
+      if (vwapAbove) { bullScore += 1; reasons.push("VWAP above"); }
+      else { bearScore += 1; reasons.push("VWAP below"); }
+      if (bbSqueeze) { reasons.push(`BB squeeze ${bbWidth.toFixed(2)}%`); if (!hasStrongSignal) confidence = Math.max(0, confidence - 15); }
+      else if (bbWidth > 1.5) { reasons.push(`BB wide ${bbWidth.toFixed(2)}%`); if (hasStrongSignal) confidence = Math.min(100, confidence + 10); }
+      if (volumeZscore > 2) { if (isBull) { bullScore += 1; reasons.push(`Vol ${volumeZscore.toFixed(1)}σ`); } else { bearScore += 1; reasons.push(`Vol ${volumeZscore.toFixed(1)}σ`); } }
+
+      if (!hasStrongSignal || confidence < cfg.confidenceThreshold || (bullScore + bearScore) < 3) return null;
+      return { dir: isBull ? "LONG" : "SHORT", conf: confidence, reason: reasons.join(", ") || (isBull ? "S2 bull" : "S2 bear") };
+    }
     case "sma_ema_cross": {
       const smaP = cfg.smaPeriod ?? 20, emaP = cfg.emaPeriod ?? 50;
       if (closes.length < emaP + 2) return null;
@@ -274,8 +337,15 @@ function checkStandardExit(
   let currentPremium = chainLtp(row, trade.optType, trade.strike);
   if (currentPremium == null || currentPremium <= 0) currentPremium = trade.inPrem; // live: model fallback → replay: hold at entry (gap: model = entry + 0.6·Δspot; chain LTP present in all live rows, so unused)
 
-  const stopLoss = Math.round(trade.inPrem * (1 - cfg.stopLossPct / 100) * 100) / 100;
-  const target = Math.round(trade.inPrem * (1 + cfg.premiumTargetPct / 100) * 100) / 100;
+  // s2 points-mode parity: SL/TP are fixed premium points around entry
+  // (live placeEntry targetMode "points" → entryPremium ± premiumTargetPoints,
+  // here premiumTargetPct doubles as the points value for s2 config).
+  const stopLoss = cfg.targetModePoints
+    ? Math.round((trade.inPrem - cfg.premiumTargetPct) * 100) / 100
+    : Math.round(trade.inPrem * (1 - cfg.stopLossPct / 100) * 100) / 100;
+  const target = cfg.targetModePoints
+    ? Math.round((trade.inPrem + cfg.premiumTargetPct) * 100) / 100
+    : Math.round(trade.inPrem * (1 + cfg.premiumTargetPct / 100) * 100) / 100;
 
   if (cfg.maxHoldingMinutes > 0 && row.ts - trade.tIn > cfg.maxHoldingMinutes * 60_000) {
     return { outPrem: Math.round(currentPremium * 100) / 100, reason: `MAX_HOLD_${cfg.maxHoldingMinutes}m` };
@@ -317,6 +387,7 @@ function runReplay(day: string, cfg: ReplayCfg, data: LoadedDay): Trade[] {
   const trades: Trade[] = [];
   let active: Trade | null = null;
   let entriesBlocked = false;
+  let lossStreak = 0; // live consecutiveLossLimit (default 3)
   const cutoff = cfg.entryCutoff.split(":").map(Number);
   const cutoffNum = (cutoff[0] ?? 0) * 100 + (cutoff[1] ?? 0);
 
@@ -331,6 +402,7 @@ function runReplay(day: string, cfg: ReplayCfg, data: LoadedDay): Trade[] {
         active.outPrem = exit.outPrem;
         active.reason = exit.reason;
         active.pnl = Math.round((exit.outPrem - active.inPrem) * LOT * 100) / 100;
+        lossStreak = active.pnl > 0 ? 0 : lossStreak + 1; // live consecutiveLossLimit
         trades.push(active);
         active = null;
       }
@@ -346,6 +418,7 @@ function runReplay(day: string, cfg: ReplayCfg, data: LoadedDay): Trade[] {
     const signal = computeSignal(row, cfg, data.candles);
     if (!signal) continue;
     if (signal.conf < cfg.confidenceThreshold) continue;
+    if (lossStreak >= 3) continue; // live: consecutiveLossLimit — skip entry on 3-loss streak
 
     const resolved = resolveStrikePremium(row, row.spot, signal.dir === "LONG", cfg);
     if (!resolved) continue;
