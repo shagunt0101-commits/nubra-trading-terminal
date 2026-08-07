@@ -279,6 +279,10 @@ const STRATEGY_PRESETS: Array<{ name: string; label: string; cfg: Partial<Scalpe
     cfg: { strategy: "sma_ema_cross", confidenceThreshold: 50, exitStrategy: "", exitMode: "sl_tp", maxHoldingMinutes: 30, entryCutoff: "14:15", premiumTargetPct: 15, stopLossPct: 50, maxEntryPremium: 600, consecutiveLossLimit: 3, paperMode: true, smaPeriod: 20, emaPeriod: 50 } },
   { name: "bb-trendgate-testing", label: "BB + Trend Gate (testing)",
     cfg: { strategy: "bollinger_band_reversal", confidenceThreshold: 50, exitStrategy: "", exitMode: "sl_tp", maxHoldingMinutes: 30, entryCutoff: "14:15", premiumTargetPct: 15, stopLossPct: 50, maxEntryPremium: 600, consecutiveLossLimit: 3, paperMode: true, trendGateAdx: 25 } },
+  // s2_scalper — live DEFAULT_CONFIG parity: ct55, points-mode SL/TP
+  // (entry ± premiumTargetPoints 4 = live replay s2 config), h15, cut 14:15.
+  { name: "s2-testing", label: "S2 Scalper (testing)",
+    cfg: { strategy: "s2_scalper", confidenceThreshold: 55, exitStrategy: "", exitMode: "sl_tp", targetMode: "points", premiumTargetPoints: 4, maxHoldingMinutes: 15, entryCutoff: "14:15", maxEntryPremium: 600, consecutiveLossLimit: 3, minDelta: 0.45, paperMode: true } },
 ];
 
 export class AutoScalper {
