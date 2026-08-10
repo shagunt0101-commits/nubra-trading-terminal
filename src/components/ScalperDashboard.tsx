@@ -140,6 +140,19 @@ export default function ScalperDashboard({ quotes, premium, fnoInstruments }: { 
   const [dateFilter, setDateFilter] = useState(""); // "" = all days, else YYYY-MM-DD (IST)
   const logsContainerRef = useRef<HTMLDivElement>(null);
   const SYMBOL_CONFIG = useMemo(() => buildSymbolConfig(fnoInstruments), [fnoInstruments]);
+  const [ofStatus, setOfStatus] = useState<{ running: boolean; refIds: number[]; file?: string | null; error?: string | null } | null>(null);
+
+  useEffect(() => {
+    const poll = async () => {
+      try {
+        const res = await fetch("/api/scalper/orderflow-status");
+        if (res.ok) setOfStatus(await res.json());
+      } catch (_) { /* ignore */ }
+    };
+    poll();
+    const t = setInterval(poll, 3000);
+    return () => clearInterval(t);
+  }, []);
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -318,14 +331,29 @@ export default function ScalperDashboard({ quotes, premium, fnoInstruments }: { 
               <Square className="h-3 w-3" /> Stop
             </button>
           )}
-          <button onClick={() => doAction("reset")} disabled={actionLoading === "reset"}
-            className="p-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white disabled:opacity-50 cursor-pointer" title="Reset">
-            <RotateCcw className="h-3 w-3" />
+          {/* Orderflow controls – toggle + live status */}
+          <button
+            onClick={() => doAction(ofStatus?.running ? "orderflow-stop" : "orderflow-start")}
+            disabled={actionLoading === "orderflow-start" || actionLoading === "orderflow-stop"}
+            className={`px-2 py-1 text-white rounded text-[10px] font-bold uppercase disabled:opacity-50 ${
+              ofStatus?.running ? "bg-red-600 hover:bg-red-500" : "bg-blue-600 hover:bg-blue-500"
+            }`}
+            title="Start/stop orderflow (1s depth) recorder">
+            {ofStatus?.running ? "■ OF Stop" : "▶ OF Start"}
           </button>
-          <button onClick={fetchStatus} disabled={actionLoading === "status"}
-            className="p-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white disabled:opacity-50 cursor-pointer" title="Refresh">
-            <RefreshCw className={`h-3 w-3 ${actionLoading === "status" ? "animate-spin" : ""}`} />
-          </button>
+          <span className={`text-[9px] px-1.5 py-0.5 rounded font-mono font-bold border ${
+            ofStatus?.running
+              ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
+              : "border-slate-600 bg-slate-800 text-slate-400"
+          }`}>
+            {ofStatus?.running ? "RUNNING" : "OFF"}
+            {ofStatus?.refIds?.length ? ` · ${ofStatus.refIds.length} strikes` : ""}
+          </span>
+          {ofStatus?.error && !ofStatus.running && (
+            <span className="text-[9px] px-1.5 py-0.5 rounded font-mono font-bold border border-red-500/30 bg-red-500/10 text-red-400" title={ofStatus.error}>
+              {ofStatus.error.slice(0, 42)}
+            </span>
+          )}
         </div>
       </div>
 
@@ -452,6 +480,7 @@ export default function ScalperDashboard({ quotes, premium, fnoInstruments }: { 
                   <th className="text-center py-1 pr-1">Exit</th>
                   <th className="text-right py-1 pr-1">P&L</th>
                   <th className="text-center py-1">Rsn</th>
+                  <th className="text-center py-1"></th>
                 </tr>
               </thead>
               <tbody>
@@ -477,6 +506,17 @@ export default function ScalperDashboard({ quotes, premium, fnoInstruments }: { 
                       <td className={`py-1 pr-1 text-right font-bold ${win ? "text-emerald-400" : "text-red-400"}`}>{win ? "+" : ""}{t.pnl?.toFixed(0) || "0"}</td>
                       <td className={`py-1 text-center ${t.exitReason === "TARGET_HIT" ? "text-emerald-400" : t.exitReason === "SL_HIT" ? "text-red-400" : "text-slate-500"}`}>
                         {t.exitReason === "TARGET_HIT" ? "TP" : t.exitReason === "SL_HIT" ? "SL" : t.exitReason === "MARKET_CLOSE" ? "MC" : t.status === "OPEN" ? "—" : (t.exitReason || "?")}
+                      </td>
+                      <td className="py-1 text-center">
+                        <button
+                          onClick={async () => {
+                            await fetch(`/api/scalper/trades/${t.id}`, { method: "DELETE" });
+                            fetchStatus();
+                          }}
+                          className="text-red-400/70 hover:text-red-300 text-[9px] font-mono px-1 cursor-pointer"
+                          title={`Remove trade ${t.id} from log`}>
+                          ✕
+                        </button>
                       </td>
                     </tr>
                   );

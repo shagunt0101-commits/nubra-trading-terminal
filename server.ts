@@ -17,6 +17,7 @@ import { computeRiskMetrics } from "./server/risk-metrics.js";
 import { scalper } from "./server/scalper-instance.js";
 import { startTickRecorder, stopTickRecorder, currentTickFile } from "./server/tick-data.js";
 import orderflowRouter from "./server/routes/orderflow.ts";
+import { startMarketScheduler, stopMarketScheduler, startOrderflowRecorder, stopOrderflowRecorder, getOrderflowRecorderStatus } from "./server/market-scheduler.js";
 import logger from "./server/logger.js";
 import { validateEnv } from "./server/env.js";
 
@@ -1286,10 +1287,24 @@ app.post("/api/scalper/reset", (req, res) => {
   res.json({ success: true, mode: scalper.getMode() });
 });
 
-app.post("/api/scalper/clear-old-trades", (req, res) => {
-  scalper.clearOldTrades();
-  res.json({ success: true, trades: scalper.getTrades().length });
+app.post("/api/scalper/orderflow-start", async (_req, res) => {
+  try { await startOrderflowRecorder(); res.json({ ok: true }); }
+  catch (e) { res.status(500).json({ ok: false, err: e?.message }); }
 });
+app.post("/api/scalper/orderflow-stop", async (_req, res) => {
+  stopOrderflowRecorder(); res.json({ ok: true });
+});
+app.get("/api/scalper/orderflow-status", (_req, res) => {
+  res.json(getOrderflowRecorderStatus());
+});
+
+app.delete("/api/scalper/trades/:id", (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ success: false, error: "Invalid trade id" });
+  const removed = scalper.removeTrade(id);
+  res.json({ success: removed, count: scalper.getTrades().length });
+});
+
 
 app.get("/api/scalper/status", (req, res) => {
   const trades = scalper.getTrades();
@@ -1362,7 +1377,7 @@ async function startServer() {
     app.use(vite.middlewares);
     server.listen(PORT, "0.0.0.0", () => {
       logger.info(`[Terminal] Dev server started on http://0.0.0.0:${PORT}`);
-      startTickRecorder();
+      startMarketScheduler();
     });
   } else if (!process.env.VERCEL) {
     const distPath = path.resolve("dist");
@@ -1372,7 +1387,7 @@ async function startServer() {
     });
     server.listen(PORT, "0.0.0.0", () => {
       logger.info(`[Terminal] Server started on http://0.0.0.0:${PORT}`);
-      startTickRecorder();
+      startMarketScheduler();
     });
   }
 }
@@ -1395,6 +1410,7 @@ if (!getSessionToken() && !process.env.VERCEL) {
 function shutdown(signal: string) {
   logger.info({ signal }, `[Shutdown] ${signal} received, closing gracefully`);
   wss.close(() => logger.info("[Shutdown] WebSocket server closed"));
+  stopMarketScheduler();
   server.close(() => {
     scalper.flushPersist().then(() => {
       logger.info("[Shutdown] HTTP server closed, state persisted");

@@ -284,6 +284,8 @@ const STRATEGY_PRESETS: Array<{ name: string; label: string; cfg: Partial<Scalpe
   // (entry ± premiumTargetPoints 4 = live replay s2 config), h15, cut 14:15.
   { name: "s2-testing", label: "S2 Scalper (testing)",
     cfg: { strategy: "s2_scalper", confidenceThreshold: 55, exitStrategy: "", exitMode: "sl_tp", targetMode: "points", premiumTargetPoints: 4, maxHoldingMinutes: 15, entryCutoff: "14:15", maxEntryPremium: 600, consecutiveLossLimit: 3, minDelta: 0.45, paperMode: true } },
+  { name: "s2-cas-auction-testing", label: "S2 CAS Auction (testing)",
+    cfg: { strategy: "s2_scalper", confidenceThreshold: 60, exitStrategy: "", exitMode: "sl_tp", targetMode: "points", premiumTargetPoints: 6, maxHoldingMinutes: 10, entryCutoff: "15:20", maxEntryPremium: 600, consecutiveLossLimit: 3, minDelta: 0.45, paperMode: true } },
 ];
 
 export class AutoScalper {
@@ -339,9 +341,21 @@ export class AutoScalper {
       this.log("STATE", "Restored SCANNING from persisted state");
       this.schedulePoll();
     } else if (state.mode === "EXIT" && state.activeTrade) {
-      this.mode = "STOPPED";
-      this.activeTrade = { ...state.activeTrade, status: "STOPPED" };
-      this.log("STATE", "Restores EXIT with open trade — LEFT STOPPED: reconcile position against broker before resuming (see /api/scalper/positions)", { trade: this.activeTrade });
+      if (state.config?.paperMode) {
+        // Paper trade — nothing held at the broker, nothing to reconcile. Close
+        // it flat at entry (no price data yet on this run) and resume scanning.
+        const pt = { ...state.activeTrade, status: "CLOSED" as const, exitTime: Date.now(), exitReason: "RESTART_FLAT", pnl: 0, pnlPct: 0 };
+        this.trades.push(pt);
+        this.activeTrade = null;
+        this.mode = "SCANNING";
+        this.startTime = Date.now();
+        this.log("STATE", `Paper trade ${pt.optType} ${pt.strike} closed flat on restart (RESTART_FLAT) — no broker position`, { trade: pt });
+        this.schedulePoll();
+      } else {
+        this.mode = "STOPPED";
+        this.activeTrade = { ...state.activeTrade, status: "STOPPED" };
+        this.log("STATE", "Restores EXIT with open trade — LEFT STOPPED: reconcile position against broker before resuming (see /api/scalper/positions)", { trade: this.activeTrade });
+      }
     }
 
     // Reconcile orphaned OPEN journal entries: any OPEN trade that is not the
@@ -539,6 +553,18 @@ export class AutoScalper {
     this.logs = this.logs.filter(l => l.ts >= todayTs);
     this.persist();
     this.log("STATE", `Old trades pruned, ${this.trades.length} remain today`);
+  }
+
+  /** Remove a single trade by id (manual log cleanup). Returns true if removed. */
+  removeTrade(id: number): boolean {
+    const before = this.trades.length;
+    this.trades = this.trades.filter(t => t.id !== id);
+    if (this.trades.length < before) {
+      this.persist();
+      this.log("STATE", `Trade ${id} removed from log manually`);
+      return true;
+    }
+    return false;
   }
 
   // ── Core Poll Loop ──────────────────────────────────────
@@ -866,8 +892,6 @@ export class AutoScalper {
     const volStd = Math.sqrt(vol20.reduce((a, b) => a + (b - volAvg) ** 2, 0) / vol20.length);
     const volumeZscore = volStd > 0 ? (vol20[vol20.length - 1] - volAvg) / volStd : 0;
 
-    let confidence = (bullScore + bearScore) > 0 ? Math.round((Math.max(bullScore, bearScore) / (bullScore + bearScore)) * 100) : 50;
-    const isBull = bullScore > bearScore;
     const hasStrongSignal = rsiVal < 30 || rsiVal > 70 || macdExpanding || macdContracting;
 
     // Fetch option chain for PCR/IV
@@ -893,9 +917,13 @@ export class AutoScalper {
     else if (atmIV < 12) reasons.push(`IV ${atmIV.toFixed(1)}% low`);
     if (vwapAbove) { bullScore += 1; reasons.push("VWAP above"); }
     else { bearScore += 1; reasons.push("VWAP below"); }
+
+    let confidence = (bullScore + bearScore) > 0 ? Math.round((Math.max(bullScore, bearScore) / (bullScore + bearScore)) * 100) : 50;
+    const isBull = bullScore > bearScore;
+
     if (bbSqueeze) { reasons.push(`BB squeeze ${bbWidth.toFixed(2)}%`); if (!hasStrongSignal) confidence = Math.max(0, confidence - 15); }
     else if (bbWidth > 1.5) { reasons.push(`BB wide ${bbWidth.toFixed(2)}%`); if (hasStrongSignal) confidence = Math.min(100, confidence + 10); }
-    if (volumeZscore > 2) { if (isBull) { bullScore += 1; reasons.push(`Vol ${volumeZscore.toFixed(1)}σ`); } else { bearScore += 1; reasons.push(`Vol ${volumeZscore.toFixed(1)}σ`); } }
+
 
     if (!hasStrongSignal || confidence < this.config.confidenceThreshold || (bullScore + bearScore) < 3) {
       return { timestamp: Date.now(), direction: "NEUTRAL", confidence: 0, reasons: [], rsi: rsiVal,
@@ -1374,9 +1402,13 @@ export class AutoScalper {
         refId = match?.ref_id || 0;
       } catch (e: any) { logger.warn({ err: e }, "[Scalper] Order refId lookup failed"); refId = 0; }
 
+      if (!refId) {
+        this.log("ERROR", `Cannot place order: refId not found for ${signal.optType} ${signal.targetStrike} — chain lookup failed`);
+        return;
+      }
       const orderPayload: any = {
         isMultiLeg: false,
-        refId: refId || (signal.optType === "CE" ? 1497712 : 1497713), // fallback
+        refId,
         qty,
         side,
         deliveryType: "IDAY",
@@ -1397,7 +1429,7 @@ export class AutoScalper {
         // position. Pre-retry, look the order up: if a matching open order exists,
         // the first one landed — do NOT place a second.
         try {
-          const existing = await this.findPendingOrder(refId, qty);
+          const existing = await this.findPendingOrder(refId, qty, side);
           if (existing) {
             this.log("STATE", `First LIMIT order landed (found broker order ${existing.intentOrderId}) — not double-placing. Entry will be marked by the reconcile pass.`);
             brokerRes = existing;
@@ -1683,9 +1715,7 @@ export class AutoScalper {
         if (match?.ref_id) refId = match.ref_id;
       } catch (e: any) { logger.warn({ err: e }, "[Scalper] Exit refId lookup failed"); }
       if (!refId) {
-        this.log("ERROR", "Exit: Could not resolve refId for strike — marking closed without order");
-        this.closeTrade(trade, exitPremium, reason);
-        return;
+        throw new Error(`Exit: Could not resolve refId for ${trade.optType} ${trade.strike} — chain lookup failed`);
       }
 
       const orderPayload: any = {
@@ -1717,6 +1747,9 @@ export class AutoScalper {
       }
 
       this.closeTrade(trade, exitPremium, reason, brokerRes);
+      this.activeTrade = null;
+      this.mode = "SCANNING";
+      this.persist();
     } catch (e: any) {
       this.log("ERROR", `Exit error: ${e.message}`);
     }
@@ -1773,10 +1806,15 @@ export class AutoScalper {
     return optChain;
   }
 
-  private async findPendingOrder(refId: number, qty: number): Promise<any | null> {
+  private async findPendingOrder(refId: number, qty: number, side: OrderSide): Promise<any | null> {
     const orders = await nubraApi.getOrders();
     const list = Array.isArray(orders) ? orders : (orders?.orders || orders?.data || []);
-    return (list as any[]).find((o: any) => Number(o.refId) === refId && Number(o.orderQty) === qty) || null;
+    return (list as any[]).find((o: any) =>
+      Number(o.refId) === refId &&
+      Number(o.orderQty) === qty &&
+      o.side === side &&
+      (o.status === "PENDING" || o.status === "OPEN" || o.status === "TRANSIT")
+    ) || null;
   }
 
   // ── Logging ────────────────────────────────────────────────
