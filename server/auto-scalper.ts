@@ -555,11 +555,20 @@ export class AutoScalper {
     this.log("STATE", `Old trades pruned, ${this.trades.length} remain today`);
   }
 
+  /** Recompute aggregate PnL stats from the current trades list (keeps stats in sync after manual removal / restore). */
+  private recomputeStats(): void {
+    const closed = this.trades.filter(t => t.status === "CLOSED" && t.pnl != null);
+    this.totalPnl = closed.reduce((s, t) => s + t.pnl, 0);
+    this.totalWins = closed.filter(t => t.pnl > 0).length;
+    this.totalLosses = closed.filter(t => t.pnl < 0).length;
+  }
+
   /** Remove a single trade by id (manual log cleanup). Returns true if removed. */
-  removeTrade(id: number): boolean {
+  removeTrade(id: string): boolean {
     const before = this.trades.length;
     this.trades = this.trades.filter(t => t.id !== id);
     if (this.trades.length < before) {
+      this.recomputeStats();
       this.persist();
       this.log("STATE", `Trade ${id} removed from log manually`);
       return true;

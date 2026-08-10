@@ -1299,8 +1299,8 @@ app.get("/api/scalper/orderflow-status", (_req, res) => {
 });
 
 app.delete("/api/scalper/trades/:id", (req, res) => {
-  const id = Number(req.params.id);
-  if (!Number.isFinite(id)) return res.status(400).json({ success: false, error: "Invalid trade id" });
+  const id = String(req.params.id);
+  if (!id) return res.status(400).json({ success: false, error: "Invalid trade id" });
   const removed = scalper.removeTrade(id);
   res.json({ success: removed, count: scalper.getTrades().length });
 });
