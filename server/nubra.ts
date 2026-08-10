@@ -425,25 +425,28 @@ export const nubraApi = {
   getMarginRequired: (query: any) =>
     nubraRequest("sentinel/orders/funds_required", {
       method: "POST",
-      body: JSON.stringify(query),
+      body: JSON.stringify({ requestType: "NEW", ...query }),
     }),
 
   createOrder: (orders: any[]) =>
     nubraRequest("sentinel/orders/create", {
       method: "POST",
-      body: JSON.stringify({ orders }),
+      body: JSON.stringify({ requestType: "NEW", orders }),
     }),
 
-  modifyOrder: (orders: any[]) =>
+  // Sentinel v2 modify — MUST wrap in orders:[] with intent names (orderId/qty/
+  // entryPrice/executionMode). Flat payloads are accepted but silently no-op —
+  // verified 2026-08-11 on 334443 (price 15→25 reflected once wrapped).
+  modifyOrder: (orderId: number, fields: Record<string, any> = {}) =>
     nubraRequest("sentinel/orders/modify", {
       method: "POST",
-      body: JSON.stringify({ orders }),
+      body: JSON.stringify({ orders: [{ orderId, ...fields }] }),
     }),
 
-  cancelOrder: (orders: any[]) =>
+  cancelOrder: (orderId: number) =>
     nubraRequest("sentinel/orders/cancel", {
       method: "POST",
-      body: JSON.stringify({ orders }),
+      body: JSON.stringify({ requestType: "NEW", orderId }),
     }),
 
   getOrders: (intentOrderId?: string, stratTags?: string) => {

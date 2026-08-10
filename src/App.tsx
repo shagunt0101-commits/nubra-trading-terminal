@@ -290,13 +290,7 @@ export default function App() {
 
   const [portfolio, setPortfolio] = useState<PortfolioSummary | null>(null);
   const [orders, setOrders] = useState<Order[] | null>(null);
-  const [prefillParams, setPrefillParams] = useState<{
-    side: "BUY" | "SELL";
-    price: number;
-    stoploss: number;
-    target: number;
-    qty: number;
-  } | null>(null);
+  const [prefillParams, setPrefillParams] = useState<any>(null);
   const [mainRightTab, setMainRightTab] = useState<"ANALYSIS" | "BUYING_ENGINE" | "BACKTEST" | "SCALPER">("ANALYSIS");
   const [centerTab, setCenterTab] = useState<"CHART" | "OPTIONS">(() => (localStorage.getItem("tradingMode") === "FNO" ? "OPTIONS" : "CHART"));
   const [showScreener, setShowScreener] = useState(true);
@@ -326,13 +320,7 @@ export default function App() {
   const fetchOptionChain = async () => { if (!selectedInstrument) return; const activeSymbol = selectedInstrument.asset || "NIFTY"; try { const res = await fetch(`/api/market/optionchain/${activeSymbol}`); if (res.ok) { const data = await res.json(); setOptionChainData(data.chain); } } catch (_) {} };
   const fetchHistoricalChart = async () => { if (!selectedInstrument) return; setIsLoadingChart(true); try { const res = await fetch("/api/market/historical", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ symbol: selectedInstrument.stock_name, interval: selectedInterval, exchange: selectedInstrument.exchange, length: 120 }) }); if (res.ok) setChartData(await res.json()); } catch (_) {} finally { setIsLoadingChart(false); } };
   const handleCancelOrder = async (orderId: number) => { try { const res = await fetch("/api/orders/cancel", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ orderId }) }); if (res.ok) { fetchOrders(); fetchPortfolio(); } } catch (_) {} };
-  const handleExecuteSignal = (params: {
-    side: "BUY" | "SELL";
-    price: number;
-    stoploss: number;
-    target: number;
-    qty: number;
-  }) => setPrefillParams(params);
+  const handleExecuteSignal = (params: any) => setPrefillParams(params);
 
   useEffect(() => { fetchAuthStatus(); fetchInstruments(); fetchPortfolio(); fetchOrders(); }, []);
   useEffect(() => { if (instruments.length > 0) { fetchAllQuotes(); initializeDefaultInstrument(instruments); } }, [instruments]);

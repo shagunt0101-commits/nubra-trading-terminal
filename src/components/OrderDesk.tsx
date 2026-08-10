@@ -12,6 +12,11 @@ interface OrderDeskProps {
     stoploss: number;
     target: number;
     qty: number;
+    refId?: number;
+    derivative_type?: string;
+    option_type?: string;
+    strike_price?: number;
+    scrip_name?: string;
   } | null;
 }
 
@@ -43,6 +48,9 @@ export default function OrderDesk({
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
+  // Option-LTP click override — takes precedence over selectedInstrument
+  const [overrideInstrument, setOverrideInstrument] = useState<Instrument | null>(null);
+
   // Pre-fill from AI signals
   useEffect(() => {
     if (prefillParams) {
@@ -62,6 +70,19 @@ export default function OrderDesk({
         setUseTarget(true);
         setTargetTrigger(prefillParams.target.toString());
         setTargetLimit((prefillParams.target - 1).toString());
+      }
+
+      // Option-LTP click → override instrument so the desk targets the option,
+      // not the stale INDEX/FUT scrip.
+      if (prefillParams.refId) {
+        const isOption = prefillParams.derivative_type === "OPT";
+        setOverrideInstrument({
+          ref_id: prefillParams.refId,
+          stock_name: prefillParams.scrip_name || (isOption ? `${prefillParams.option_type} ${prefillParams.strike_price}` : ""),
+          derivative_type: prefillParams.derivative_type || "OPT",
+          option_type: prefillParams.option_type || "",
+          asset: "FNO",
+        } as Instrument);
       }
     }
   }, [prefillParams]);
@@ -94,9 +115,11 @@ export default function OrderDesk({
     );
   };
 
+  const targetInstrument = overrideInstrument || selectedInstrument;
+
   const handlePlaceOrder = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (orderType === "SINGLE" && !selectedInstrument) return;
+    if (orderType === "SINGLE" && !targetInstrument) return;
     setIsLoading(true);
     setError("");
     setMessage("");
@@ -113,7 +136,7 @@ export default function OrderDesk({
       };
 
       if (orderType === "SINGLE") {
-        payload.refId = selectedInstrument!.ref_id;
+        payload.refId = targetInstrument!.ref_id;
         if (priceType === "LIMIT") {
           // Convert price to integer paise as expected by OMS V3
           payload.entryPrice = Math.round(parseFloat(entryPrice) * 100);
@@ -223,7 +246,7 @@ export default function OrderDesk({
           {/* SINGLE ORDER CONFIG */}
           {orderType === "SINGLE" ? (
             <>
-              {!selectedInstrument ? (
+              {!targetInstrument ? (
                 <div className="text-center py-10 text-gray-500 text-xs font-serif italic">
                   Please pick an asset from the Screener.
                 </div>
@@ -231,7 +254,7 @@ export default function OrderDesk({
                 <div className="space-y-3">
                   <div className="flex justify-between items-center glass-base p-3 rounded border border-brand-border">
                     <span className="text-xs text-gray-400 font-serif italic">Active Scrip</span>
-                    <span className="text-xs font-bold text-white">{selectedInstrument.stock_name}</span>
+                    <span className="text-xs font-bold text-white">{targetInstrument.stock_name}</span>
                   </div>
 
                   {/* Side Switch */}

@@ -1062,6 +1062,38 @@ app.post("/api/orders/place", async (req, res) => {
   }
 });
 
+// Modifies an open order (price/qty/SL-trigger). Intent wrap required —
+// flat payloads are accepted but silently ignored (see nubra.ts modifyOrder).
+app.post("/api/orders/modify", async (req, res) => {
+  const { orderId, orderPrice, orderQty, entryTriggerPrice, side } = req.body;
+  try {
+    const isConnected = !!getSessionToken();
+    let brokerRes = null;
+
+    if (isConnected) {
+      const fields: Record<string, any> = {};
+      if (orderPrice != null) fields.entryPrice = parseInt(orderPrice, 10);
+      if (orderQty != null) fields.qty = parseInt(orderQty, 10);
+      fields.executionMode = "ENTRY";
+      // FLEXI SL trigger: BUY → atOrAbove, SELL → atOrBelow (verified live)
+      if (entryTriggerPrice != null) {
+        fields.entryConfig = {
+          triggers: { ltp: { [side === "SELL" ? "atOrBelow" : "atOrAbove"]: { value: parseInt(entryTriggerPrice, 10) } } },
+        };
+      }
+      brokerRes = await nubraApi.modifyOrder(parseInt(orderId, 10), fields);
+    }
+
+    res.json({
+      success: true,
+      message: "Order modified successfully.",
+      brokerResponse: brokerRes,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Cancels an order
 app.post("/api/orders/cancel", async (req, res) => {
   const { orderId } = req.body;
@@ -1070,7 +1102,7 @@ app.post("/api/orders/cancel", async (req, res) => {
     let brokerRes = null;
 
     if (isConnected) {
-      brokerRes = await nubraApi.cancelOrder([{ orderId: parseInt(orderId, 10) }]);
+      brokerRes = await nubraApi.cancelOrder(parseInt(orderId, 10));
     }
 
     ordersSimCache = ordersSimCache.map((ord) =>
