@@ -1014,6 +1014,10 @@ app.post("/api/orders/place", async (req, res) => {
         validityType: validityType || "DAY",
         executionMode: req.body.executionMode || "ENTRY",
       };
+      // ENTRY_AND_EXIT requires exit_config (snake) with camelCase params (paise)
+      if (req.body.exit_config || req.body.exitConfig) {
+        orderPayload.exit_config = req.body.exit_config || req.body.exitConfig;
+      }
 
       if (!isMultiLeg) {
         orderPayload.refId = parseInt(refId as any, 10);
