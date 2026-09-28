@@ -103,23 +103,21 @@ export function startMarketScheduler() {
     const date = getIsoDate();
     if (open && !startedToday) {
       startedToday = true;
-      startTickRecorder();
-      await startOrderflowRecorder();
-      logger.info({ date }, "[MarketScheduler] Market OPEN — tick + orderflow started");
+      // capture disabled (2026-08-13): tick + orderflow recorders not started
+      logger.info({ date }, "[MarketScheduler] Market OPEN — capture disabled");
     } else if (!open && startedToday) {
       startedToday = false;
       stopTickRecorder();
       stopOrderflowRecorder();
-      logger.info({ date }, "[MarketScheduler] Market CLOSED — tick + orderflow stopped");
+      logger.info({ date }, "[MarketScheduler] Market CLOSED");
     }
   }, 30_000);
   schedulerTimer.unref();
   // Initial check
   if (isMarketHours()) {
     startedToday = true;
-    startTickRecorder();
-    startOrderflowRecorder().catch(() => {});
-    logger.info("[MarketScheduler] Initial: market OPEN — started both");
+    // capture disabled (2026-08-13): tick + orderflow recorders not started
+    logger.info("[MarketScheduler] Initial: market OPEN — capture disabled");
   }
 }
 

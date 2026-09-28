@@ -42,6 +42,10 @@ export interface BTOpts {
   rsiPeriod?: number; overbought?: number; oversold?: number;
   bbPeriod?: number; bbStdDev?: number;
   smaPeriod?: number; emaPeriod?: number;
+  // FVG params
+  fvgTrendTf15m?: boolean; fvgTrendTf1h?: boolean;
+  fvgRiskReward?: number; // default 1.8
+  fvgLookback?: number; // candles to look back for FVGs
 }
 
 // Premium model — two-sided, mirrors the LIVE paper model (auto-scalper
@@ -116,6 +120,9 @@ export function s2SignalAt(S: S2Surface, closes: number[], i: number): { dir: "L
   if (bear >= 3) return { dir: "SHORT", conf: Math.round(confidence) };
   return null;
 }
+
+// Import FVG utilities
+import { detectFVGs, checkFVGMitigation, getTrendDirection, FVG } from "./strategy-engine";
 
 // Precomputed per-strategy signal arrays (stage-0): indicators are causal
 // (value at i depends only on candles ≤ i), so a one-pass array walk over the
@@ -231,6 +238,10 @@ function signalAt(
       if (peLast <= P.rsiThr && spotRsiLast < 50 && P.peS[i] <= P.maxPrem) return { dir: "SHORT", conf: 70 };
       return null;
     }
+    case "fvg_strategy": {
+      // FVG strategy handled in runBacktest directly (requires multi-TF candles)
+      return null;
+    }
     default: return null;
   }
 }
@@ -239,7 +250,7 @@ function signalAt(
 // buys CE/PE at LTP, exits on premium points/% target). The backtest must price the
 // same trade: premium entries with premium exits + premium cost class. Spot-% modeling
 // of a premium trade is a different instrument — it invalidated the first optimizer run.
-export const PREMIUM_STRATEGIES = new Set(["option_rsi_mr", "s2_scalper", "sma_ema_cross", "rsi_overbought_oversold", "bollinger_band_reversal", "trend_continuation", "bb_mean_reversion", "rsi_reversal", "sma_ema_trend"]);
+export const PREMIUM_STRATEGIES = new Set(["option_rsi_mr", "s2_scalper", "sma_ema_cross", "rsi_overbought_oversold", "bollinger_band_reversal", "trend_continuation", "bb_mean_reversion", "rsi_reversal", "sma_ema_trend", "fvg_strategy"]);
 
 export function runBacktest(candles: BTCandle[], opts: BTOpts): BTRun {
   const s = opts.strategy;
@@ -278,6 +289,34 @@ export function runBacktest(candles: BTCandle[], opts: BTOpts): BTRun {
   };
   const signals = precomputeSignals(candles, s, opts);
   const closes = candles.map(c => c.close);
+
+  // FVG Strategy: Multi-timeframe trend + FVG detection + retest entry
+  let fvgTrend15m: "bullish" | "bearish" | "neutral" = "neutral";
+  let fvgTrend1h: "bullish" | "bearish" | "neutral" = "neutral";
+  let fvgs: FVG[] = [];
+  let pendingFVG: FVG | null = null;
+  let ema21_15m: number[] = [];
+  let ema50_15m: number[] = [];
+  let ema21_1h: number[] = [];
+  let ema50_1h: number[] = [];
+  if (s === "fvg_strategy") {
+    // Use adaptive periods based on data length
+    const n = candles.length;
+    const p15m_fast = Math.min(21, Math.max(5, Math.floor(n / 15)));
+    const p15m_slow = Math.min(50, Math.max(10, Math.floor(n / 6)));
+    const p1h_fast = Math.min(21, Math.max(5, Math.floor(n / 60)));
+    const p1h_slow = Math.min(50, Math.max(10, Math.floor(n / 25)));
+
+    ema21_15m = calculateEMA(closes, p15m_fast);
+    ema50_15m = calculateEMA(closes, p15m_slow);
+    ema21_1h = calculateEMA(closes, p1h_fast);
+    ema50_1h = calculateEMA(closes, p1h_slow);
+    console.log(`[FVG] Data length=${n}, 15m EMA periods: ${p15m_fast}/${p15m_slow}, 1h EMA periods: ${p1h_fast}/${p1h_slow}`);
+
+    // Detect all FVGs upfront
+    fvgs = detectFVGs(candles);
+    console.log(`[FVG] Detected ${fvgs.length} FVGs total`);
+  }
   // Real ATM option delta ≈ 0.5: premium moves at ~half the spot-model's rate.
   // Held premium = entry + 0.5×(model move), theta-decayed, floored at 0.15×
   // entry (live parity — auto-scalper paper exit keeps the same floor; without
@@ -316,7 +355,45 @@ export function runBacktest(candles: BTCandle[], opts: BTOpts): BTRun {
 
   for (let i = 50; i < candles.length; i++) {
     const c = candles[i];
+
+    // FVG Strategy logic
+    if (s === "fvg_strategy") {
+      // Update trend on every bar (using precomputed EMAs)
+      if (i < ema50_15m.length && i < ema50_1h.length) {
+        fvgTrend15m = ema21_15m[i] > ema50_15m[i] && closes[i] > ema21_15m[i] ? "bullish"
+          : ema21_15m[i] < ema50_15m[i] && closes[i] < ema21_15m[i] ? "bearish" : "neutral";
+        fvgTrend1h = ema21_1h[i] > ema50_1h[i] && closes[i] > ema21_1h[i] ? "bullish"
+          : ema21_1h[i] < ema50_1h[i] && closes[i] < ema21_1h[i] ? "bearish" : "neutral";
+      }
+
+      // Check if any unmitigated FVG is now mitigated (retest)
+      for (const fvg of fvgs) {
+        if (!fvg.mitigated && fvg.index < i) {
+          const mitigated = checkFVGMitigation(candles, fvg, i);
+          if (mitigated) {
+            fvg.mitigated = true;
+            fvg.mitigationIndex = i;
+            // Check if trend aligns for entry
+            const trendAlign = (fvg.type === "bullish" && (fvgTrend15m === "bullish" || fvgTrend1h === "bullish"))
+              || (fvg.type === "bearish" && (fvgTrend15m === "bearish" || fvgTrend1h === "bearish"));
+            if (trendAlign && !pendingFVG) {
+              pendingFVG = fvg;
+              console.log(`[FVG] Pending ${fvg.type} FVG at i=${fvg.index}, trend15m=${fvgTrend15m} trend1h=${fvgTrend1h}, mitigation@${i}`);
+            }
+          }
+        }
+      }
+
+      // Debug: log trend every 50 bars
+      if (i % 50 === 0 && i > 0) {
+        console.log(`[FVG] i=${i} trend15m=${fvgTrend15m} trend1h=${fvgTrend1h} pending=${pendingFVG?.type||"none"} fvgs_mitigated=${fvgs.filter(f=>f.mitigated).length}/${fvgs.length}`);
+      }
+    }
+
     if (pos) {
+      // Skip exit check on entry bar (prevents instant SL hit from same-bar range)
+      if (i === pos.entryBar) continue;
+
       // session gap: force-flatten at prior close (no phantom SL through a missing session).
       // A position entered at the PREVIOUS bar's open would otherwise flatten at that
       // same bar's close → exitTime === entryTime; close it at the gap bar instead.
@@ -346,9 +423,17 @@ export function runBacktest(candles: BTCandle[], opts: BTOpts): BTRun {
             if (lo <= maxSeen * trailPct) { closeTrade(c, i, "TRAIL", lo); continue; }
           }
         } else {
-          // sl_tp: SL checked first (conservative — SL wins on same-bar ambiguity)
-          if (lo <= pos.stopLoss) { closeTrade(c, i, "SL", Math.min(lo, pos.stopLoss)); continue; }
-          if (hi >= pos.target) { closeTrade(c, i, "TP", Math.max(hi, pos.target)); continue; }
+          // sl_tp: direction-aware SL/TP for CE (LONG) vs PE (SHORT)
+          // CE/LONG: premium rises with spot → SL = lo <= stopLoss, TP = hi >= target
+          // PE/SHORT: premium rises when spot falls → SL = hi >= stopLoss, TP = lo <= target
+          const isLong = pos.optType === "CE";
+          if (isLong) {
+            if (lo <= pos.stopLoss) { closeTrade(c, i, "SL", Math.min(lo, pos.stopLoss)); continue; }
+            if (hi >= pos.target) { closeTrade(c, i, "TP", Math.max(hi, pos.target)); continue; }
+          } else {
+            if (hi >= pos.stopLoss) { closeTrade(c, i, "SL", Math.max(hi, pos.stopLoss)); continue; }
+            if (lo <= pos.target) { closeTrade(c, i, "TP", Math.min(lo, pos.target)); continue; }
+          }
         }
         if (maxHold && i - pos.entryBar >= maxHold) { closeTrade(c, i, "TIME"); continue; }
         if (sessionCloseMin && istClock(c.ts) >= sessionCloseMin) { closeTrade(c, i, "EOD"); continue; }
@@ -373,6 +458,48 @@ export function runBacktest(candles: BTCandle[], opts: BTOpts): BTRun {
         if (i === candles.length - 1) { closeTrade(c, i, "EOD"); continue; }
       }
       continue;
+    }
+
+    // ---- FVG entry: check for pending mitigated FVG with trend alignment ----
+    if (s === "fvg_strategy" && pendingFVG) {
+      const entryC = candles[i + 1];
+      if (entryC) {
+        const atm = Math.round(entryC.open / atmStep) * atmStep;
+        const rr = opts.fvgRiskReward ?? 1.8;
+        const isBullish = pendingFVG.type === "bullish";
+        const opt = isBullish ? "CE" : "PE";
+        const entryPremium = premC(entryC.ts, entryC.open, atm, opt);
+        const minPrem = opts.maxEntryPremium ?? 600;
+
+        if (entryPremium > 0 && entryPremium <= minPrem) {
+          // SL at FVG high/low (spot levels converted to premium)
+          // Premium model: prem = spot * 0.00385 + 0.6 * (spot - atm) for CE
+          // Premium change per spot point = 0.60385 for CE, -0.60385 for PE
+          const fvgSpotSL = isBullish ? pendingFVG.bottom : pendingFVG.top;
+          const fvgSpotEntry = entryC.open;
+          const spotDist = Math.abs(fvgSpotEntry - fvgSpotSL);
+          const premPerSpot = opt === "CE" ? 0.60385 : -0.60385;
+          const slDist = spotDist * Math.abs(premPerSpot);
+          const slPrice = isBullish ? entryPremium - slDist : entryPremium + slDist;
+          const tpPrice = isBullish ? entryPremium + slDist * rr : entryPremium - slDist * rr;
+
+          // Fallback: if slDist too small (< 0.5), use 2% of entry premium
+          const minSlDist = entryPremium * 0.02;
+          const effectiveSlDist = Math.max(slDist, minSlDist);
+          const effectiveSlPrice = isBullish ? entryPremium - effectiveSlDist : entryPremium + effectiveSlDist;
+          const effectiveTpPrice = isBullish ? entryPremium + effectiveSlDist * rr : entryPremium - effectiveSlDist * rr;
+
+          pos = {
+            side: isBullish ? "BUY" : "SELL", optType: opt, entryTime: entryC.ts, entryPrice: entryC.open,
+            entryPremium, atm,
+            stopLoss: Math.round(effectiveSlPrice * 100) / 100,
+            target: Math.round(effectiveTpPrice * 100) / 100,
+            entryBar: i + 1, maxPriceSeen: entryPremium, phase1TargetHit: false,
+          };
+          pendingFVG = null;
+          console.log(`[FVG] Entry ${isBullish?"LONG":"SHORT"} @ ${entryPremium.toFixed(2)}, SL ${effectiveSlPrice.toFixed(2)} (spot:${fvgSpotSL.toFixed(1)}), TP ${effectiveTpPrice.toFixed(2)}, RR=${rr}, spotDist=${spotDist.toFixed(1)}, slDist=${effectiveSlDist.toFixed(2)}`);
+        }
+      }
     }
 
     // ---- entry: signal on closed candle i, execute at open of i+1 (no lookahead) ----

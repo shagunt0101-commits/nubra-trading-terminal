@@ -130,6 +130,13 @@ export interface ScalperConfig {
   srEnabled: boolean;
   srTimeframe: string;  // "15m" (default) | "1h" — zone candles
   srZonePct: number;    // half-width of each zone, % of price (default 0.15)
+  // FVG Strategy config
+  fvgRiskReward: number;      // RR for TP (default 1.8)
+  fvgMaxHoldMinutes: number;  // max hold for FVG trades (default 60)
+  // FVG multi-TF cache
+  fvgCandles1m: any[];
+  fvgCandles15m: any[];
+  fvgCandles1h: any[];
 }
 
 export interface ScalperSignal {
@@ -188,6 +195,13 @@ export interface TradeRecord {
   phase1TargetHit?: boolean;
   maxPriceSeen?: number;
   currentPremium?: number;
+  // Broker-side FLEXI order tracking (syncState → syncBrokerExit)
+  brokerOrderId?: number;   // intentOrderId of the FLEXI order at entry
+  brokerSlP?: number;       // last SL trigger sent to broker (paise, tick-rounded)
+  tpRemoved?: boolean;      // TP disabled on broker after 80%-TP milestone
+  rsiTrailActive?: boolean; // RSI ≥ 70 observed — ride the trail, exit only if RSI < 70
+  consecutiveRsiBelow70?: number; // Counter for RSI exit condition
+  consecutiveRsiBelow60?: number;
 }
 
 const DEFAULT_CONFIG: ScalperConfig = {
@@ -199,10 +213,16 @@ const DEFAULT_CONFIG: ScalperConfig = {
   totalQty: 130,
   pollIntervalMs: 15_000,
   confidenceThreshold: 55,
-  premiumTargetPct: 30,
+  premiumTargetPct: 5,
   stopLossPct: 20,
   maxSpreadPct: 5,
   strikeOffset: 1,
+  // FVG defaults
+  fvgRiskReward: 1.8,
+  fvgMaxHoldMinutes: 60,
+  fvgCandles1m: [],
+  fvgCandles15m: [],
+  fvgCandles1h: [],
   strikeStep: 50,
   consecutiveLossLimit: 3,
   minPremiumThreshold: 0.5,
@@ -211,9 +231,9 @@ const DEFAULT_CONFIG: ScalperConfig = {
   paperMode: true,
   optionRsiThreshold: 40,
   optionRsiPeriod: 14,
-  premiumTargetPoints: 4,
-  premiumStopLossPct: 50,
-  targetMode: "points",
+  premiumTargetPoints: 0,
+  premiumStopLossPct: 30,
+  targetMode: "percent",
   minDelta: 0.45,
   maxEntryPremium: 600,              // skip if premium > ₹₹ (default 600 — covers NIFTY/SENSEX/BANKNIFTY)
   expiryFilterCE: "12:30",
@@ -283,7 +303,7 @@ const STRATEGY_PRESETS: Array<{ name: string; label: string; cfg: Partial<Scalpe
   // s2_scalper — live DEFAULT_CONFIG parity: ct55, points-mode SL/TP
   // (entry ± premiumTargetPoints 4 = live replay s2 config), h15, cut 14:15.
   { name: "s2-testing", label: "S2 Scalper (testing)",
-    cfg: { strategy: "s2_scalper", confidenceThreshold: 55, exitStrategy: "", exitMode: "sl_tp", targetMode: "points", premiumTargetPoints: 4, maxHoldingMinutes: 15, entryCutoff: "14:15", maxEntryPremium: 600, consecutiveLossLimit: 3, minDelta: 0.45, paperMode: true } },
+    cfg: { strategy: "s2_scalper", confidenceThreshold: 55, exitStrategy: "", exitMode: "sl_tp", targetMode: "percent", premiumTargetPct: 15, maxHoldingMinutes: 15, entryCutoff: "14:15", maxEntryPremium: 600, consecutiveLossLimit: 3, minDelta: 0.45, paperMode: true } },
   { name: "s2-cas-auction-testing", label: "S2 CAS Auction (testing)",
     cfg: { strategy: "s2_scalper", confidenceThreshold: 60, exitStrategy: "", exitMode: "sl_tp", targetMode: "points", premiumTargetPoints: 6, maxHoldingMinutes: 10, entryCutoff: "15:20", maxEntryPremium: 600, consecutiveLossLimit: 3, minDelta: 0.45, paperMode: true } },
 ];
@@ -1023,6 +1043,168 @@ export class AutoScalper {
    * Entry PE: 1-min option PE RSI <= threshold AND 15-min spot RSI < 50
    * Target: fixed premium points (default 4), SL: fixed % of premium (default -50%)
    */
+  /**
+   * FVG Strategy: Multi-TF trend + FVG detection + mitigation entry
+   * 15m/1h EMA trend filter → 1m FVG detection → wait for mitigation → enter
+   * SL at FVG boundary, TP at RR * risk
+   */
+  private async computeFVG(spot: number, candles1m: any[], closes1m: number[]): Promise<ScalperSignal | null> {
+    if (closes1m.length < 50) return null;
+
+    // 1. Build 15m and 1h candles from 1m data
+    const candles15m = this.buildHigherTFCandles(candles1m, 15);
+    const candles1h = this.buildHigherTFCandles(candles1m, 60);
+
+    if (candles15m.length < 30 || candles1h.length < 30) return null;
+
+    // 2. Trend detection on 15m and 1h (EMA 21/50)
+    const trend15m = this.getTrendDirectionEMA(candles15m);
+    const trend1h = this.getTrendDirectionEMA(candles1h);
+
+    // Require both TFs aligned (or at least 1h aligned, 15m neutral)
+    const trendAligned = (trend15m === trend1h && trend1h !== "neutral") ||
+                         (trend1h !== "neutral" && trend15m === "neutral");
+    if (!trendAligned) return null;
+
+    const isBull = trend1h === "bullish";
+    const direction = isBull ? "BUY_CE" : "BUY_PE";
+
+    // 3. Detect FVGs on 1m candles
+    const fvgs = this.detectFVGs(candles1m);
+    if (!fvgs.length) return null;
+
+    // 4. Find unmitigated FVG in trend direction, most recent first
+    let entryFVG: any = null;
+    for (let i = fvgs.length - 1; i >= 0; i--) {
+      const fvg = fvgs[i];
+      if (fvg.type === (isBull ? "bullish" : "bearish") && !fvg.mitigated) {
+        // Check if mitigated on current candle
+        const currentIdx = candles1m.length - 1;
+        const mitigated = this.checkFVGMitigation(candles1m, fvg, currentIdx);
+        if (mitigated) {
+          entryFVG = fvg;
+          break;
+        }
+      }
+    }
+
+    if (!entryFVG) return null;
+
+    // 5. Calculate SL/TP
+    // SL at FVG boundary (bottom for bullish, top for bearish)
+    // Convert spot SL distance to premium using option premium model slope (~0.6 per spot point)
+    const spotSL = isBull ? entryFVG.bottom : entryFVG.top;
+    const spotDistance = Math.abs(spot - spotSL);
+    const premiumPerSpot = 0.60385; // CE: 0.00385 + 0.6 = 0.60385, PE: similar
+    const slPremiumDist = spotDistance * premiumPerSpot;
+    const entryPremium = this.estimatePremium(spot, isBull);
+    const minSLPremium = entryPremium * 0.02; // min 2% of entry premium
+    const slPremium = Math.max(slPremiumDist, minSLPremium);
+
+    const stopLossPremium = isBull
+      ? Math.round((entryPremium - slPremium) * 100) / 100
+      : Math.round((entryPremium + slPremium) * 100) / 100;
+
+    const riskPremium = Math.abs(entryPremium - stopLossPremium);
+    const targetPremium = isBull
+      ? Math.round((entryPremium + riskPremium * this.config.fvgRiskReward) * 100) / 100
+      : Math.round((entryPremium - riskPremium * this.config.fvgRiskReward) * 100) / 100;
+
+    // 6. Resolve strike and premium
+    const signal = await this.resolveStrikePremium(spot, isBull, 80, [
+      `FVG ${entryFVG.type} mitigated @ ${entryFVG.timestamp}`,
+      `Trend 1h=${trend1h} 15m=${trend15m}`,
+      `SL @ FVG ${isBull ? "bottom" : "top"} (${spotSL})`,
+      `RR ${this.config.fvgRiskReward}`
+    ], 50, "flat", false, 0, 0, 1, 15);
+
+    if (signal.direction === "NEUTRAL") return null;
+
+    // Override SL/TP with FVG-calculated values
+    signal.stopLossPremium = stopLossPremium;
+    signal.targetPremium = targetPremium;
+    signal.premium = entryPremium;
+
+    return signal;
+  }
+
+  private buildHigherTFCandles(candles1m: any[], multiplier: number): any[] {
+    const higher: any[] = [];
+    for (let i = 0; i < candles1m.length; i += multiplier) {
+      const slice = candles1m.slice(i, i + multiplier);
+      if (slice.length < multiplier * 0.8) continue; // skip incomplete bars
+      const open = slice[0].open;
+      const high = Math.max(...slice.map(c => c.high));
+      const low = Math.min(...slice.map(c => c.low));
+      const close = slice[slice.length - 1].close;
+      const volume = slice.reduce((a, c) => a + (c.volume || 0), 0);
+      const ts = slice[0].ts;
+      higher.push({ ts, open, high, low, close, volume });
+    }
+    return higher;
+  }
+
+  private getTrendDirectionEMA(candles: any[]): "bullish" | "bearish" | "neutral" {
+    if (candles.length < 50) return "neutral";
+    const closes = candles.map(c => c.close);
+    const ema21 = calculateEMA(closes, 21);
+    const ema50 = calculateEMA(closes, 50);
+    const last = candles.length - 1;
+    if (ema21[last] > ema50[last] && closes[last] > ema21[last]) return "bullish";
+    if (ema21[last] < ema50[last] && closes[last] < ema21[last]) return "bearish";
+    return "neutral";
+  }
+
+  private detectFVGs(candles: any[]): any[] {
+    const fvgs: any[] = [];
+    for (let i = 1; i < candles.length - 1; i++) {
+      const prev = candles[i - 1];
+      const curr = candles[i];
+      const next = candles[i + 1];
+
+      // Bullish FVG: gap between prev.high and next.low
+      if (prev.high < next.low && curr.close > curr.open) {
+        fvgs.push({
+          type: "bullish",
+          top: next.low,
+          bottom: prev.high,
+          index: i,
+          timestamp: curr.ts,
+          mitigated: false
+        });
+      }
+      // Bearish FVG: gap between prev.low and next.high
+      if (prev.low > next.high && curr.close < curr.open) {
+        fvgs.push({
+          type: "bearish",
+          top: prev.low,
+          bottom: next.high,
+          index: i,
+          timestamp: curr.ts,
+          mitigated: false
+        });
+      }
+    }
+    return fvgs;
+  }
+
+  private checkFVGMitigation(candles: any[], fvg: any, currentIndex: number): boolean {
+    for (let i = fvg.index + 1; i <= currentIndex; i++) {
+      const c = candles[i];
+      if (fvg.type === "bullish" && c.low <= fvg.bottom) return true;
+      if (fvg.type === "bearish" && c.high >= fvg.top) return true;
+    }
+    return false;
+  }
+
+  private estimatePremium(spot: number, isBull: boolean): number {
+    // Use same premium model as backtest-engine
+    const atm = Math.round(spot / 50) * 50;
+    return isBull
+      ? spot * 0.00385 + Math.max(0, (spot - atm) * 0.6)
+      : spot * 0.00385 - Math.max(0, (atm - spot) * 0.6);
+  }
+
   private async computeOptionRsiMR(spot: number, candles: any[], closes: number[]): Promise<ScalperSignal | null> {
     const period = this.config.optionRsiPeriod || 14;
     const threshold = this.config.optionRsiThreshold || 32;
@@ -1321,6 +1503,8 @@ export class AutoScalper {
         return this.computeBB(spot, candles, closes);
       case "option_rsi_mr":
         return this.computeOptionRsiMR(spot, candles, closes);
+      case "fvg_strategy":
+        return this.computeFVG(spot, candles, closes);
       case "s2_scalper":
       default:
         return this.computeS2(spot, candles, closes);
@@ -1426,6 +1610,15 @@ export class AutoScalper {
         entryPrice: premiumPaise,
         executionMode: "ENTRY",
         stratTags: ["auto-scalper", `conf-${signal.confidence}`],
+        // Add broker-native SL/TP (ENTRY_AND_EXIT) for option_rsi_mr
+        ...(this.config.strategy === "option_rsi_mr" && signal.stopLossPremium && signal.targetPremium
+          ? {
+              exitConfig: {
+                stopLoss: Math.round(signal.stopLossPremium * 100),
+                target: Math.round(signal.targetPremium * 100),
+              },
+            }
+          : {}),
       };
 
       let brokerRes: any = null;
@@ -1632,9 +1825,10 @@ export class AutoScalper {
       if (currentPremium >= trade.target) {
         trade.phase1TargetHit = true;
         trade.maxPriceSeen = currentPremium;
-        // Move SL to breakeven
-        trade.stopLoss = trade.entryPremium;
-        this.log("EXIT", `Phase 2: target hit, SL moved to breakeven (${trade.stopLoss})`);
+        // Move SL to entry + 40% of initial TP distance
+        const initialTpDistance = trade.target - trade.entryPremium;
+        trade.stopLoss = trade.entryPremium + initialTpDistance * 0.4;
+        this.log("EXIT", `Phase 2: target hit, SL moved to breakeven+40% (${trade.stopLoss.toFixed(2)})`);
       }
       return; // still in phase 1, wait for target
     }
@@ -1644,6 +1838,23 @@ export class AutoScalper {
     // Update max price seen
     if (currentPremium > (trade.maxPriceSeen || entry)) {
       trade.maxPriceSeen = currentPremium;
+    }
+
+    // Implement point-buffer trailing logic for option_rsi_mr
+    // Every 2 point move, trail SL by 1.4 points.
+    if (trade.maxPriceSeen && trade.stopLoss) {
+      const pointMoveThreshold = 2; // 2 points gain
+      const trailAmount = 1.4;      // trail by 1.4 points
+
+      // Calculate potential new stop loss based on trailing
+      // If currentPremium is >= 2 points above the entry, trail SL by 1.4 points for every 2 points of peak gain
+      if (currentPremium - trade.entryPremium >= pointMoveThreshold) {
+        const potentialNewStopLoss = trade.maxPriceSeen - trailAmount;
+        if (potentialNewStopLoss > trade.stopLoss) {
+          trade.stopLoss = potentialNewStopLoss;
+          this.log("EXIT", `Trailing SL updated: ${trade.stopLoss.toFixed(2)}`);
+        }
+      }
     }
 
     // 80% trailing SL exit
@@ -1684,9 +1895,18 @@ export class AutoScalper {
 
       const rsiArr = calculateRSI(premSeries, period);
       const rsi = rsiArr.length > 0 ? rsiArr[rsiArr.length - 1] : 50;
-      if (rsi >= 70) {
-        await this.exitPosition(currentPremium, `RSI_TRAIL (rsi: ${rsi.toFixed(1)} ≥ 70, max: ${(trade.maxPriceSeen || entry).toFixed(1)})`);
-        return;
+      // RSI >= 60 ride: continue holding, don't exit (relaxed from 70)
+      // RSI < 60 for 2 consecutive closes: market exit
+      if (rsi >= 60) {
+        // Reset counter on strong RSI
+        trade.consecutiveRsiBelow60 = 0;
+      } else {
+        // RSI < 60, increment counter
+        trade.consecutiveRsiBelow60 = (trade.consecutiveRsiBelow60 || 0) + 1;
+        if (trade.consecutiveRsiBelow60 >= 2) {
+          await this.exitPosition(currentPremium, `RSI_EXIT_MR (rsi: ${rsi.toFixed(1)} < 60 x 2)`);
+          return;
+        }
       }
     }
 

@@ -4,7 +4,8 @@ import { nubraApi } from "../nubra.js";
 import { validate, backtestSchema } from "../validation.js";
 import { fetchCandles, fetchOptionCandles } from "../market-data.js";
 import { calculateSMA, calculateEMA, calculateRSI, calculateBollingerBands, calculateMACD } from "../indicators.js";
-import { evaluateTrendContinuation, evaluateBBMeanReversal, evaluateRSIReversal, evaluateTrendFollow } from "../strategy-engine.js";
+import { evaluateTrendContinuation, evaluateBBMeanReversal, evaluateRSIReversal, evaluateTrendFollow, detectFVGs, checkFVGMitigation, getTrendDirection } from "../strategy-engine.js";
+import { runBacktest } from "../backtest-engine.js";
 
 const router = Router();
 
@@ -13,13 +14,19 @@ router.post("/", validate(backtestSchema), async (req, res) => {
     symbol, strategy, interval = "5m", length = 200, riskReward = 2,
     stopLossPercent = 1.5, targetPercent = 3, exchange = "NSE",
     confidenceThreshold = 55, premiumTargetPct = 30, stopLossPct = 15,
-    optionRsiThreshold = 40, optionRsiPeriod = 14, maxEntryPremium = 200, premiumTargetPoints = 4
+    optionRsiThreshold = 40, optionRsiPeriod = 14, maxEntryPremium = 200, premiumTargetPoints = 4,
+    maxHoldBars = 60
   } = req.body;
 
   try {
     let candles = await fetchCandles(symbol, exchange, interval, length);
+    console.log(`[FVG-BACKTEST] Fetched ${candles.length} candles for ${symbol} ${interval}`);
     if (candles.length === 0) {
       return res.status(500).json({ error: "No data available for backtest." });
+    }
+    if (candles.length > 0) {
+      console.log(`[FVG-BACKTEST] First candle:`, candles[0]);
+      console.log(`[FVG-BACKTEST] Last candle:`, candles[candles.length - 1]);
     }
 
     const closes = candles.map((c: any) => c.close);
@@ -32,6 +39,24 @@ router.post("/", validate(backtestSchema), async (req, res) => {
     let currentPosition: any = null;
     let balance = 100000;
     const initialBalance = balance;
+
+    // Helper to build higher TF candles from 1m
+    function buildHigherTFCandles(src: any[], mult: number): any[] {
+      const out: any[] = [];
+      for (let i = 0; i < src.length; i += mult) {
+        const slice = src.slice(i, i + mult);
+        if (slice.length < mult * 0.8) continue;
+        out.push({
+          ts: slice[0].ts,
+          open: slice[0].open,
+          high: Math.max(...slice.map(c => c.high)),
+          low: Math.min(...slice.map(c => c.low)),
+          close: slice[slice.length - 1].close,
+          volume: slice.reduce((a, c) => a + (c.volume || 0), 0)
+        });
+      }
+      return out;
+    }
 
     let ceOptCandles: any[] = [];
     let peOptCandles: any[] = [];
@@ -137,6 +162,41 @@ router.post("/", validate(backtestSchema), async (req, res) => {
       } else if (strategy === "bollinger_band_reversal") {
         if (closes[i] > bb.lower[i] && closes[i - 1] <= bb.lower[i - 1]) { triggerSignal = true; side = "BUY"; }
         else if (closes[i] < bb.upper[i] && closes[i - 1] >= bb.upper[i - 1]) { triggerSignal = true; side = "SELL"; }
+      } else if (strategy === "fvg_strategy") {
+        // FVG position management
+        const price = candle.close;
+        const ci = i < ceOptCandles.length && i < peOptCandles.length ? i : null;
+        const useRealCe = ci != null && ceOptCandles[ci]?.close > 0;
+        const useRealPe = ci != null && peOptCandles[ci]?.close > 0;
+        const atm = Math.round(price / 50) * 50;
+        const curPrem = currentPosition.optType === "CE"
+          ? (useRealCe ? ceOptCandles[ci!].close : price * 0.006 + Math.max(0, (price - atm) * 0.6))
+          : (useRealPe ? peOptCandles[ci!].close : price * 0.005 + Math.max(0, (atm - price) * 0.6));
+        const entryP = currentPosition.entryPremium;
+
+        // Check max hold time (convert bar index to minutes for 1m data)
+        const holdMinutes = i - currentPosition.entryTime * 60000 / 60000; // approximate
+        const maxHold = currentPosition.fvgMaxHoldMinutes || 60;
+        if (holdMinutes >= maxHold) {
+          const pnlVal = (curPrem - entryP) * 100;
+          balance += pnlVal;
+          trades.push({ ...currentPosition, exitTime: Math.round(candle.ts / 1000000), exitPrice: price, exitPremium: Math.round(curPrem * 100) / 100, pnl: Math.round(pnlVal * 100) / 100, pnlPercent: Math.round((curPrem / entryP - 1) * 10000) / 100, result: pnlVal > 0 ? "WIN" : "LOSS", exitReason: "TIME" });
+          currentPosition = null;
+          continue;
+        }
+
+        // SL/TP check
+        const slHit = currentPosition.side === "BUY" ? curPrem <= currentPosition.stopLoss : curPrem >= currentPosition.stopLoss;
+        const tpHit = currentPosition.side === "BUY" ? curPrem >= currentPosition.target : curPrem <= currentPosition.target;
+
+        if (slHit || tpHit || i === candles.length - 1) {
+          const exitPrem = slHit ? currentPosition.stopLoss : tpHit ? currentPosition.target : curPrem;
+          const pnlVal = (exitPrem - entryP) * 100;
+          balance += pnlVal;
+          trades.push({ ...currentPosition, exitTime: Math.round(candle.ts / 1000000), exitPrice: price, exitPremium: Math.round(exitPrem * 100) / 100, pnl: Math.round(pnlVal * 100) / 100, pnlPercent: Math.round((exitPrem / entryP - 1) * 10000) / 100, result: pnlVal > 0 ? "WIN" : "LOSS", exitReason: slHit ? "SL" : tpHit ? "TP" : "EOD" });
+          currentPosition = null;
+        }
+        continue;
       } else if (strategy === "s2_scalper") {
         const s2Macd = calculateMACD(closes, 12, 26, 9);
         if (i < (interval === "15m" || interval === "1h" || interval === "4h" || interval === "1d" ? 26 : 40)) continue;
@@ -245,6 +305,89 @@ router.post("/", validate(backtestSchema), async (req, res) => {
               status: "OPEN", maxPriceSeen: entryPremium, phase1TargetHit: false,
             };
           }
+        }
+      } else if (strategy === "fvg_strategy") {
+        // FVG Strategy: Multi-TF trend + FVG detection + mitigation entry
+        // Build 15m/1h candles from 1m for trend detection
+        // if (interval !== "1m") continue; // FVG requires 1m data - allow any interval for testing
+
+        // Build higher TF candles for trend
+        const candles15m = buildHigherTFCandles(candles.slice(0, i + 1), 15);
+        const candles1h = buildHigherTFCandles(candles.slice(0, i + 1), 60);
+        if (candles15m.length < 30 || candles1h.length < 30) continue;
+
+        // Trend detection
+        const trend15m = getTrendDirection(candles15m, 21, 50);
+        const trend1h = getTrendDirection(candles1h, 21, 50);
+        const trendAligned = (trend15m === trend1h && trend1h !== "neutral") ||
+                            (trend1h !== "neutral" && trend15m === "neutral");
+        if (!trendAligned) continue;
+
+        const isBull = trend1h === "bullish";
+
+        // Detect FVGs on 1m up to current bar
+        const slice1m = candles.slice(0, i + 1);
+        const fvgs = detectFVGs(slice1m);
+        if (!fvgs.length) continue;
+
+        // Find mitigated FVG in trend direction (most recent)
+        let entryFVG: any = null;
+        for (let j = fvgs.length - 1; j >= 0; j--) {
+          const fvg = fvgs[j];
+          if (fvg.type === (isBull ? "bullish" : "bearish")) {
+            const mitigated = checkFVGMitigation(slice1m, fvg, i);
+            if (mitigated) {
+              entryFVG = fvg;
+              break;
+            }
+          }
+        }
+        if (!entryFVG) continue;
+
+        // Calculate SL/TP
+        const spot = candle.close;
+        const spotSL = isBull ? entryFVG.bottom : entryFVG.top;
+        const spotDistance = Math.abs(spot - spotSL);
+        const premiumPerSpot = 0.60385;
+        const slPremiumDist = spotDistance * premiumPerSpot;
+        const atm = Math.round(spot / 50) * 50;
+        const entryPremium = isBull
+          ? spot * 0.00385 + Math.max(0, (spot - atm) * 0.6)
+          : spot * 0.00385 - Math.max(0, (atm - spot) * 0.6);
+        const minSLPremium = entryPremium * 0.02;
+        const slPremium = Math.max(slPremiumDist, minSLPremium);
+
+        const stopLossPremium = isBull
+          ? entryPremium - slPremium
+          : entryPremium + slPremium;
+
+        const riskPremium = Math.abs(entryPremium - stopLossPremium);
+        const rr = riskReward || 1.8;
+        const targetPremium = isBull
+          ? entryPremium + riskPremium * rr
+          : entryPremium - riskPremium * rr;
+
+        // Validate entry premium
+        if (entryPremium > (maxEntryPremium || 600)) continue;
+
+        triggerSignal = true;
+        side = isBull ? "BUY" : "SELL";
+
+        // Store FVG-specific data for position management
+        currentPosition = {
+          id: trades.length + 1, symbol, side,
+          entryTime: Math.round(candle.ts / 1000000),
+          entryPrice: spot, entryPremium,
+          optType: isBull ? "CE" : "PE", strike: atm,
+          stopLoss: stopLossPremium, target: targetPremium,
+          qty: 1, status: "OPEN", maxPriceSeen: entryPremium,
+          phase1TargetHit: false, exitMode: "sl_tp",
+          fvgRiskReward: rr, fvgMaxHoldMinutes: maxHoldBars || 60
+        };
+
+        // Debug logging
+        if (trades.length === 0) {
+          console.log(`[FVG-DEBUG] i=${i} trend15m=${trend15m} trend1h=${trend1h} fvgs=${fvgs.length} entryFVG=${entryFVG.type} spot=${spot} entryPrem=${entryPremium.toFixed(2)} SL=${stopLossPremium.toFixed(2)} TP=${targetPremium.toFixed(2)}`);
         }
       }
 

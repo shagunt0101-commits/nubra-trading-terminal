@@ -174,6 +174,74 @@ export function evaluateS2Scalper(
   return { direction: "NONE", confidence: 0 };
 }
 
+export interface FVG {
+  type: "bullish" | "bearish";
+  top: number;
+  bottom: number;
+  index: number;
+  timestamp: number;
+  mitigated: boolean;
+  mitigationIndex?: number;
+}
+
+export function detectFVGs(candles: ind.Candle[]): FVG[] {
+  const fvgs: FVG[] = [];
+  for (let i = 1; i < candles.length - 1; i++) {
+    const prev = candles[i - 1];
+    const curr = candles[i];
+    const next = candles[i + 1];
+
+    // Bullish FVG: gap between prev.high and next.low
+    if (prev.high < next.low && curr.close > curr.open) {
+      fvgs.push({
+        type: "bullish",
+        top: next.low,
+        bottom: prev.high,
+        index: i,
+        timestamp: curr.ts,
+        mitigated: false
+      });
+    }
+    // Bearish FVG: gap between prev.low and next.high
+    if (prev.low > next.high && curr.close < curr.open) {
+      fvgs.push({
+        type: "bearish",
+        top: prev.low,
+        bottom: next.high,
+        index: i,
+        timestamp: curr.ts,
+        mitigated: false
+      });
+    }
+  }
+  return fvgs;
+}
+
+export function checkFVGMitigation(candles: ind.Candle[], fvg: FVG, currentIndex: number): boolean {
+  if (fvg.mitigated) return true;
+  for (let i = fvg.index + 1; i <= currentIndex; i++) {
+    const c = candles[i];
+    if (fvg.type === "bullish" && c.low <= fvg.bottom) {
+      return true;
+    }
+    if (fvg.type === "bearish" && c.high >= fvg.top) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function getTrendDirection(candles: ind.Candle[], fastPeriod = 21, slowPeriod = 50): "bullish" | "bearish" | "neutral" {
+  if (candles.length < slowPeriod) return "neutral";
+  const closes = candles.map(c => c.close);
+  const emaFast = ind.calculateEMA(closes, fastPeriod);
+  const emaSlow = ind.calculateEMA(closes, slowPeriod);
+  const lastIdx = candles.length - 1;
+  if (emaFast[lastIdx] > emaSlow[lastIdx] && closes[lastIdx] > emaFast[lastIdx]) return "bullish";
+  if (emaFast[lastIdx] < emaSlow[lastIdx] && closes[lastIdx] < emaFast[lastIdx]) return "bearish";
+  return "neutral";
+}
+
 export function calculateTrailingSL(
   entryPrice: number,
   highestPrice: number,
