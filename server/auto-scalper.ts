@@ -1100,6 +1100,8 @@ export class AutoScalper {
     const entryPremium = this.estimatePremium(spot, isBull);
     const minSLPremium = entryPremium * 0.02; // min 2% of entry premium
     const slPremium = Math.max(slPremiumDist, minSLPremium);
+    // Debug: log premium calculation details
+    console.log(`[FVG-Calc] spot=${spot}, spotSL=${spotSL}, spotDist=${spotDistance.toFixed(1)}, premPerSpot=${premiumPerSpot}, slDist=${slPremiumDist.toFixed(2)}, entryPremium=${entryPremium.toFixed(2)}, minSL=${minSLPremium.toFixed(2)}, finalSL=${slPremium.toFixed(2)}`);
 
     const stopLossPremium = isBull
       ? Math.round((entryPremium - slPremium) * 100) / 100
