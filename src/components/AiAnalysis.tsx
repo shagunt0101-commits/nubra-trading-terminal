@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { Sparkles, RefreshCw, Send, ShieldAlert, Award, FileText, Settings, Key, Globe, Cpu } from "lucide-react";
-import { Instrument, ChartDataPoint, PortfolioSummary } from "../types";
+import { Instrument, ChartDataPoint, PortfolioSummary, OptionChainData, OptionChain, OptionLeg } from "../types";
 import { useMarketData } from "../context/MarketDataContext";
 
 interface AiAnalysisProps {
@@ -15,7 +15,7 @@ interface AiAnalysisProps {
     target: number;
     qty: number;
   }) => void;
-  optionChain?: any;
+  optionChain?: OptionChainData | null;
   tradingMode?: "EQ" | "FNO" | "NONE";
 }
 
@@ -34,15 +34,25 @@ export default function AiAnalysis({
 
   const [strategy, setStrategy] = useState<"scalping" | "day_trading" | "swing_trading" | "btst" | "stbt">("day_trading");
   const [report, setReport] = useState<string>("");
+  const [reportTs, setReportTs] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
   const [viewMode, setViewMode] = useState<"structured" | "markdown">("markdown");
 
+  // Per-symbol report cache (localStorage) — survives reloads; new reports only on click
+  const CACHE_KEY = "ai-report-cache-v1";
+  const [reportCache, setReportCache] = useState<Record<string, { report: string; ts: number }>>(() => {
+    try { return JSON.parse(localStorage.getItem(CACHE_KEY) || "{}"); } catch { return {}; }
+  });
+  React.useEffect(() => {
+    try { localStorage.setItem(CACHE_KEY, JSON.stringify(reportCache)); } catch {}
+  }, [reportCache]);
+
   // Custom AI Provider Configuration (session-only, never persisted to localStorage)
-  const [aiProvider, setAiProvider] = useState<"gemini" | "custom">("gemini");
-  const [customApiKey, setCustomApiKey] = useState("");
-  const [customBaseUrl, setCustomBaseUrl] = useState("https://api.openai.com/v1");
-  const [customModel, setCustomModel] = useState("gpt-4o-mini");
+  const [aiProvider, setAiProvider] = useState<"gemini" | "custom">("custom");
+  const [customApiKey, setCustomApiKey] = useState("sk-465c5eb94747369b-79rdet-df5f3014");
+  const [customBaseUrl, setCustomBaseUrl] = useState("https://r3uxl5j.abc-tunnel.us/v1");
+  const [customModel, setCustomModel] = useState("ag1");
   const [showAiSettings, setShowAiSettings] = useState(false);
 
   // Settings are session-only — never persisted to localStorage
@@ -56,8 +66,8 @@ export default function AiAnalysis({
 
   const ceList = optionChain?.chain?.ce || [];
   const peList = optionChain?.chain?.pe || [];
-  const atmCe = ceList.find((c: any) => Math.round(c.sp / 100) === atmStrike) || ceList[0];
-  const atmPe = peList.find((p: any) => Math.round(p.sp / 100) === atmStrike) || peList[0];
+  const atmCe = ceList.find((c: OptionLeg) => Math.round(c.sp / 100) === atmStrike) || ceList[0];
+  const atmPe = peList.find((p: OptionLeg) => Math.round(p.sp / 100) === atmStrike) || peList[0];
 
   const formatOiVal = (val: number) => {
     if (!val) return "0";
@@ -68,6 +78,9 @@ export default function AiAnalysis({
 
   const handleGenerate = async () => {
     if (!instrument || chartData.length === 0) return;
+    // Guard against the report resolving after the user switched symbol: capture
+    // the requested key and mute the result if the selection moved on mid-flight.
+    const reqKey = `${instrument.stock_name}|${strategy}`;
     setIsLoading(true);
     setError("");
 
@@ -78,7 +91,7 @@ export default function AiAnalysis({
         strategy,
         priceData: {
           ltp: latestCandle.close,
-          prevClose: instrument.underlying_prev_close / 100,
+          prevClose: instrument.underlying_prev_close ? instrument.underlying_prev_close / 100 : (chartData[0]?.close || latestCandle.close),
           high: latestCandle.high,
           low: latestCandle.low,
         },
@@ -134,7 +147,13 @@ export default function AiAnalysis({
       }
 
       const data = await res.json();
+      const currentKey = `${instrument?.stock_name}|${strategy}`;
+      // Stale: user switched symbol while the request was in flight — drop it.
+      if (currentKey !== reqKey) return;
       setReport(data.report);
+      setReportTs(Date.now());
+      // Cache per symbol+strategy — shown again when revisiting, no re-fetch
+      setReportCache((c) => ({ ...c, [reqKey]: { report: data.report, ts: Date.now() } }));
     } catch (err: any) {
       setError(err.message || "Failed to generate AI signals.");
     } finally {
@@ -142,15 +161,19 @@ export default function AiAnalysis({
     }
   };
 
-  // Auto-trigger analysis when instrument or option chain changes to provide instant "deep insight"
+  // Show cached report when instrument or strategy changes — generate only on click
   React.useEffect(() => {
-    if (instrument && chartData.length > 0) {
-      if (tradingMode === "FNO" && !optionChain) {
-        return; // Wait for option chain data to arrive to do a deep analysis
-      }
-      handleGenerate();
+    const cached = reportCache[`${instrument?.stock_name}|${strategy}`];
+    if (cached) {
+      setReport(cached.report);
+      setReportTs(cached.ts);
+    } else {
+      setReport("");
+      setReportTs(0);
     }
-  }, [instrument?.ref_id, optionChain?.asset, tradingMode, strategy]);
+    setError("");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [instrument?.stock_name, strategy]);
 
   // Parses parameters from markdown to support the one-click order filler
   const handleAutoFill = () => {
@@ -190,12 +213,12 @@ export default function AiAnalysis({
   };
 
   return (
-    <div className="bg-brand-card border border-brand-border rounded-lg p-4 flex flex-col h-[680px] shadow-2xl overflow-hidden">
+    <div className="glass-surface border border-brand-border rounded-xl flex flex-col flex-1 min-h-0 overflow-hidden shadow-2xl glass-enter">
       {/* Panel Header */}
-      <div className="flex items-center justify-between mb-4 border-b border-brand-border pb-3 bg-black/20">
+      <div className="flex items-center justify-between mb-4 border-b border-brand-border pb-3 glass-base/50">
         <div className="flex items-center gap-2">
           <Sparkles className="h-4 w-4 text-brand-green animate-pulse" />
-          <h2 className="font-serif italic text-sm text-gray-400">AI Signal Engine</h2>
+          <h2 className="font-serif italic text-sm text-gray-200">AI Signal Engine</h2>
           <button
             onClick={() => setShowAiSettings(!showAiSettings)}
             className={`p-1 rounded hover:bg-white/5 border transition-colors cursor-pointer ${
@@ -214,19 +237,19 @@ export default function AiAnalysis({
             <select
               value={strategy}
               onChange={(e) => setStrategy(e.target.value as any)}
-              className="bg-black border border-brand-border text-xs text-white rounded px-2.5 py-1.5 focus:outline-none cursor-pointer"
+              className="bg-black border border-brand-border text-[11px] text-white rounded px-2 py-1 focus:outline-none cursor-pointer"
             >
-              <option value="scalping">Scalping Strategy</option>
-              <option value="day_trading">Day Trading Intraday</option>
-              <option value="swing_trading">Swing Trading Strategy</option>
-              <option value="btst">BTST (Buy Today, Sell Tomorrow)</option>
-              <option value="stbt">STBT (Sell Today, Buy Tomorrow)</option>
+              <option value="scalping">Scalping</option>
+              <option value="day_trading">Day Trading</option>
+              <option value="swing_trading">Swing Trading</option>
+              <option value="btst">BTST</option>
+              <option value="stbt">STBT</option>
             </select>
 
             <button
               onClick={handleGenerate}
               disabled={isLoading}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-white text-black hover:bg-gray-100 rounded text-xs font-bold transition-all disabled:opacity-50 cursor-pointer"
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-white text-black hover:bg-gray-100 rounded text-[11px] font-bold transition-all disabled:opacity-50 cursor-pointer"
             >
               {isLoading ? (
                 <RefreshCw className="h-3 w-3 animate-spin" />
@@ -241,7 +264,7 @@ export default function AiAnalysis({
 
       {/* Collapsible Settings Panel */}
       {showAiSettings && (
-        <div className="mb-4 p-3.5 bg-black/40 border border-brand-border rounded-lg space-y-3 animate-fade-in font-sans">
+        <div className="mb-4 p-3 glass-surface border border-brand-border rounded-lg space-y-3 animate-fade-in font-sans">
           <div className="flex items-center justify-between border-b border-white/[0.04] pb-2">
             <span className="text-[10px] font-bold text-gray-400 font-mono tracking-wider uppercase">AI ENGINE ROUTING</span>
             <span className="text-[9px] px-1.5 py-0.5 bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 rounded font-mono font-bold">
@@ -255,7 +278,7 @@ export default function AiAnalysis({
               className={`py-1.5 rounded text-xs font-bold font-mono transition-all border cursor-pointer text-center ${
                 aiProvider === "gemini"
                   ? "bg-indigo-600 border-indigo-500 text-white shadow-md shadow-indigo-600/10"
-                  : "bg-black/30 border-brand-border text-gray-400 hover:text-gray-200"
+                  : "glass-surface-sm border-brand-border text-gray-400 hover:text-gray-200"
               }`}
             >
               Google Gemini
@@ -265,7 +288,7 @@ export default function AiAnalysis({
               className={`py-1.5 rounded text-xs font-bold font-mono transition-all border cursor-pointer text-center ${
                 aiProvider === "custom"
                   ? "bg-brand-green border-brand-green text-black shadow-md shadow-brand-green/15"
-                  : "bg-black/30 border-brand-border text-gray-400 hover:text-gray-200"
+                  : "glass-surface-sm border-brand-border text-gray-400 hover:text-gray-200"
               }`}
             >
               Custom API Provider
@@ -331,19 +354,27 @@ export default function AiAnalysis({
       <div className="flex-1 overflow-y-auto pr-1 space-y-4">
         {!instrument ? (
           <div className="h-full flex flex-col items-center justify-center text-gray-500 text-xs text-center">
-            <Award className="h-8 w-8 text-gray-750 mb-2" />
-            <span className="font-serif italic text-white/95 text-sm mb-1">Signal Workspace Offline</span>
+            <Award className="h-8 w-8 text-slate-700 mb-2" />
+            <span className="font-serif italic text-white/90 text-sm mb-1">Signal Workspace Offline</span>
             <span className="text-[10px] text-gray-500 max-w-[240px] font-mono">Select an asset from the screener first to trigger AI analytics.</span>
+          </div>
+        ) : error && !isLoading ? (
+          <div className="p-4 glass-surface border border-brand-red/20 text-brand-red rounded flex items-start gap-2.5 font-mono">
+            <ShieldAlert className="h-4 w-4 shrink-0 mt-0.5" />
+            <div className="text-xs space-y-1">
+              <p className="font-bold uppercase">Analysis Refused</p>
+              <p className="text-gray-400">{error}</p>
+            </div>
           </div>
         ) : !report && !isLoading ? (
           <div className="h-full flex flex-col items-center justify-center text-gray-500 text-xs text-center space-y-3">
-            <FileText className="h-8 w-8 text-gray-700" />
-            <p className="font-serif italic text-white/95 text-sm">
+            <FileText className="h-8 w-8 text-slate-700" />
+            <p className="font-serif italic text-white/90 text-sm">
               Ready to analyze {instrument.stock_name}
             </p>
             <button
               onClick={handleGenerate}
-              className="px-4 py-2 bg-black border border-brand-border hover:bg-white/5 text-gray-300 rounded font-semibold text-xs tracking-wider uppercase cursor-pointer"
+              className="px-4 py-2 glass-surface border border-brand-border hover:bg-white/5 text-gray-300 rounded font-semibold text-[11px] tracking-wider uppercase cursor-pointer"
             >
               Start Analysis Now
             </button>
@@ -356,25 +387,22 @@ export default function AiAnalysis({
                 {aiProvider === "gemini" ? "Gemini" : "Custom AI"} is processing market parameters...
               </p>
               <p className="text-[10px] text-gray-500 max-w-[280px] font-mono mx-auto">
-                Calculating RSI oscillators, matching options chains, evaluating margin thresholds, and framing target stoplosses.
+                Calculating RSI oscillators, matching price chains, evaluating margin thresholds, and framing target stoplosses.
               </p>
-            </div>
-          </div>
-        ) : error ? (
-          <div className="p-4 bg-brand-red/10 border border-brand-red/20 text-brand-red rounded flex items-start gap-2.5 font-mono">
-            <ShieldAlert className="h-4 w-4 shrink-0 mt-0.5" />
-            <div className="text-xs space-y-1">
-              <p className="font-bold uppercase">Analysis Refused</p>
-              <p className="text-gray-400">{error}</p>
             </div>
           </div>
         ) : (
           <div className="space-y-4">
             {/* View Mode Toggle */}
-            <div className="flex items-center justify-between bg-black/30 p-1.5 rounded border border-brand-border">
+            <div className="flex items-center justify-between glass-surface-sm p-1.5 rounded border border-brand-border">
               <div className="flex items-center gap-1.5 text-xs font-mono text-gray-400 px-2">
                 <Cpu className="h-3.5 w-3.5 text-brand-green" />
                 <span>AI Advisory Report</span>
+                {reportTs > 0 && (
+                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-white/5 border border-white/10 text-gray-500 font-mono">
+                    cached {new Date(reportTs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                  </span>
+                )}
               </div>
               <div className="flex items-center gap-1">
                 <button
@@ -385,7 +413,7 @@ export default function AiAnalysis({
                       : "text-gray-400 hover:text-white"
                   }`}
                 >
-                  Structured Cards
+                  Structured
                 </button>
                 <button
                   onClick={() => setViewMode("markdown")}
@@ -395,7 +423,7 @@ export default function AiAnalysis({
                       : "text-gray-400 hover:text-white"
                   }`}
                 >
-                  Raw Markdown
+                  Markdown
                 </button>
               </div>
             </div>
@@ -413,7 +441,7 @@ export default function AiAnalysis({
                   return (
                     <div className={`p-3 rounded-lg border flex items-center justify-between ${badgeColor}`}>
                       <div className="flex items-center gap-2">
-                        <span className="text-xs font-mono font-bold px-2 py-0.5 rounded bg-black/40 border border-white/10 uppercase">
+                        <span className="text-xs font-mono font-bold px-2 py-0.5 rounded glass-base border border-white/10 uppercase">
                           {biasText}
                         </span>
                         <span className="text-xs text-gray-300 font-medium">
@@ -447,15 +475,15 @@ export default function AiAnalysis({
                     const sl = isSell ? basePrice * (1 + slMult / 100) : basePrice * (1 - slMult / 100);
                     const tp = isSell ? basePrice * (1 - tpMult / 100) : basePrice * (1 + tpMult / 100);
                     return (<>
-                      <div className="bg-black/40 border border-brand-border p-2.5 rounded">
+                      <div className="glass-base border border-brand-border p-2.5 rounded">
                         <p className="text-[10px] text-gray-500 font-mono uppercase">{isFno ? "Entry (Premium)" : "Entry Trigger"}</p>
                         <p className="text-sm font-bold font-mono text-white mt-0.5">{basePrice.toFixed(2)}</p>
                       </div>
-                      <div className="bg-black/40 border border-brand-border p-2.5 rounded">
+                      <div className="glass-base border border-brand-border p-2.5 rounded">
                         <p className="text-[10px] text-gray-500 font-mono uppercase">Target Price</p>
                         <p className="text-sm font-bold font-mono text-emerald-400 mt-0.5">{tp.toFixed(2)}</p>
                       </div>
-                      <div className="bg-black/40 border border-brand-border p-2.5 rounded">
+                      <div className="glass-base border border-brand-border p-2.5 rounded">
                         <p className="text-[10px] text-gray-500 font-mono uppercase">Stop Loss</p>
                         <p className="text-sm font-bold font-mono text-rose-400 mt-0.5">{sl.toFixed(2)}</p>
                       </div>
@@ -464,7 +492,7 @@ export default function AiAnalysis({
                 </div>
 
                 {/* 3. Distinct Dashboard Cards Grid */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-[360px] overflow-y-auto pr-1.5">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-[300px] overflow-y-auto pr-1.5 scrollbar-thin">
                   {(() => {
                     const sections: Record<number, string> = { 1: "", 2: "", 3: "", 4: "", 5: "", 6: "", 7: "" };
                     const fallbacks = [
@@ -511,7 +539,7 @@ export default function AiAnalysis({
                     return (
                       <>
                         {/* Sentiment Card */}
-                        <div className="bg-black/30 border border-brand-border p-3.5 rounded-lg flex flex-col justify-between">
+                        <div className="glass-surface-sm border border-brand-border p-3.5 rounded-lg flex flex-col justify-between">
                           <div>
                             <div className="flex items-center justify-between mb-2">
                               <span className="text-[11px] font-bold text-gray-200 font-mono uppercase tracking-wider flex items-center gap-1.5">
@@ -529,7 +557,7 @@ export default function AiAnalysis({
                         </div>
 
                         {/* Liquidity Levels Card */}
-                        <div className="bg-black/30 border border-brand-border p-3.5 rounded-lg flex flex-col justify-between">
+                        <div className="glass-surface-sm border border-brand-border p-3.5 rounded-lg flex flex-col justify-between">
                           <div>
                             <div className="flex items-center justify-between mb-2">
                               <span className="text-[11px] font-bold text-gray-200 font-mono uppercase tracking-wider flex items-center gap-1.5">
@@ -547,7 +575,7 @@ export default function AiAnalysis({
                         </div>
 
                         {/* Support & Resistance Card */}
-                        <div className="bg-black/30 border border-brand-border p-3.5 rounded-lg flex flex-col justify-between">
+                        <div className="glass-surface-sm border border-brand-border p-3.5 rounded-lg flex flex-col justify-between">
                           {(() => {
                             const lastClose = chartData[chartData.length - 1]?.close || 24200;
                             const bbUpper = chartData[chartData.length - 1]?.bbUpper;
@@ -574,7 +602,7 @@ export default function AiAnalysis({
                         </div>
 
                         {/* BTST / STBT & Risk Metrics Card */}
-                        <div className="bg-black/30 border border-brand-border p-3.5 rounded-lg flex flex-col justify-between">
+                        <div className="glass-surface-sm border border-brand-border p-3.5 rounded-lg flex flex-col justify-between">
                           {(() => {
                             const lastClose = chartData[chartData.length - 1]?.close || 24200;
                             const atr = Math.abs((chartData[chartData.length - 1]?.high || lastClose) - (chartData[chartData.length - 1]?.low || lastClose)) || lastClose * 0.01;
@@ -604,7 +632,7 @@ export default function AiAnalysis({
               </div>
             ) : (
               <div className="prose prose-invert prose-emerald max-w-none text-xs text-gray-300 leading-relaxed space-y-4">
-                <div className="markdown-body p-4 bg-black/40 rounded border border-brand-border font-sans max-h-[400px] overflow-y-auto text-sm leading-relaxed">
+                <div className="markdown-body p-4 glass-base rounded border border-brand-border font-sans max-h-[60vh] lg:max-h-[400px] overflow-y-auto text-sm leading-relaxed">
                   <ReactMarkdown>{report}</ReactMarkdown>
                 </div>
               </div>

@@ -1,19 +1,53 @@
-import React, { useState } from "react";
+import React, { useState, useMemo } from "react";
 import { Play, TrendingUp, TrendingDown, Target, ShieldAlert, Award, FileText, BarChart2 } from "lucide-react";
 import { Instrument, BacktestResult } from "../types";
 
 interface BacktesterProps {
   selectedInstrument: Instrument | null;
   selectedInterval: string;
+  onIntervalChange: (v: string) => void;
 }
 
-export default function Backtester({ selectedInstrument, selectedInterval }: BacktesterProps) {
+// Candle durations in seconds
+const MIN = 60, HOUR = 3600, DAY = 86400;
+
+// Duration presets → approximate candle count per TF
+const DURATIONS: Record<string, { label: string; getLen: (tfSecs: number) => number }> = {
+  "1d":  { label: "1 Day",  getLen: (s) => Math.ceil(6.25 * 3600 / s) + 20 },   // ~6.25h market
+  "5d":  { label: "5 Days", getLen: (s) => Math.ceil(5 * 6.25 * 3600 / s) + 20 },
+  "1m":  { label: "1 Month",getLen: (s) => Math.ceil(22 * 6.25 * 3600 / s) + 20 },
+  "3m":  { label: "3 Month",getLen: (s) => Math.ceil(66 * 6.25 * 3600 / s) + 20 },
+  "6m":  { label: "6 Month",getLen: (s) => Math.ceil(132 * 6.25 * 3600 / s) + 20 },
+  "1y":  { label: "1 Year", getLen: (s) => Math.ceil(264 * 6.25 * 3600 / s) + 20 },
+};
+
+const TF_SECONDS: Record<string, number> = {
+  "1m": MIN, "3m": 3 * MIN, "5m": 5 * MIN, "15m": 15 * MIN,
+  "1h": HOUR, "4h": 4 * HOUR, "1d": DAY,
+};
+
+export default function Backtester({ selectedInstrument, selectedInterval, onIntervalChange }: BacktesterProps) {
   const [strategy, setStrategy] = useState("sma_ema_cross");
+  const [duration, setDuration] = useState("5d");
   const [stopLoss, setStopLoss] = useState(1.5);
   const [target, setTarget] = useState(3.0);
   const [results, setResults] = useState<BacktestResult | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
+  // S2 Scalper params
+  const [ct, setCt] = useState(55);
+  const [pt, setPt] = useState(30);
+  const [sl, setSl] = useState(15);
+  // Option RSI MR params
+  const [optRsiThreshold, setOptRsiThreshold] = useState(40);
+  const [optRsiPeriod, setOptRsiPeriod] = useState(14);
+  const [optMaxPremium, setOptMaxPremium] = useState(200);
+  const [optTargetPts, setOptTargetPts] = useState(4);
+
+  const length = useMemo(() => {
+    const tfSec = TF_SECONDS[selectedInterval] || MIN;
+    return DURATIONS[duration]?.getLen(tfSec) || 200;
+  }, [duration, selectedInterval]);
 
   const handleRunBacktest = async () => {
     if (!selectedInstrument) return;
@@ -29,9 +63,18 @@ export default function Backtester({ selectedInstrument, selectedInterval }: Bac
           symbol: selectedInstrument.stock_name,
           strategy,
           interval: selectedInterval,
-          stopLossPercent: stopLoss,
-          targetPercent: target,
-          length: 180,
+          stopLossPercent: strategy === "s2_scalper" ? sl : stopLoss,
+          targetPercent: strategy === "s2_scalper" ? pt : target,
+          // premium-strategies exit knobs (engine reads these; spot %s are ignored on premium paths)
+          premiumStopLossPct: strategy === "s2_scalper" ? sl : undefined,
+          premiumTargetPct: strategy === "s2_scalper" ? pt : undefined,
+          confidenceThreshold: strategy === "s2_scalper" ? ct : undefined,
+          length,
+          // Option RSI MR params
+          optionRsiThreshold: strategy === "option_rsi_mr" ? optRsiThreshold : undefined,
+          optionRsiPeriod: strategy === "option_rsi_mr" ? optRsiPeriod : undefined,
+          maxEntryPremium: strategy === "option_rsi_mr" ? optMaxPremium : undefined,
+          premiumTargetPoints: strategy === "option_rsi_mr" ? optTargetPts : undefined,
         }),
       });
 
@@ -41,17 +84,17 @@ export default function Backtester({ selectedInstrument, selectedInterval }: Bac
 
       const data = await res.json();
       setResults(data);
-    } catch (err: any) {
-      setError(err.message || "Failed to execute backtesting simulation.");
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to execute backtesting simulation.");
     } finally {
       setIsLoading(false);
     }
   };
 
   return (
-    <div className="bg-brand-card border border-brand-border rounded-lg p-5 shadow-2xl flex flex-col h-[650px] overflow-hidden">
+    <div className="glass-surface border border-brand-border rounded-lg p-5 shadow-2xl flex flex-col flex-1 min-h-0 overflow-hidden">
       {/* Header Controls */}
-      <div className="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3 border-b border-brand-border pb-3 mb-4 bg-black/20">
+      <div className="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3 border-b border-brand-border pb-3 mb-4 glass-base/50">
         <div className="flex items-center gap-2">
           <BarChart2 className="h-4 w-4 text-gray-400" />
           <h2 className="font-serif italic text-sm text-gray-400">Backtesting Engine</h2>
@@ -60,6 +103,24 @@ export default function Backtester({ selectedInstrument, selectedInterval }: Bac
         {selectedInstrument && (
           <div className="flex flex-wrap items-center gap-2">
             <select
+              value={duration}
+              onChange={(e) => setDuration(e.target.value)}
+              className="bg-black border border-brand-border text-xs text-white rounded px-2 py-1.5 focus:outline-none cursor-pointer font-mono"
+            >
+              {Object.entries(DURATIONS).map(([k, v]) => (
+                <option key={k} value={k}>{v.label}</option>
+              ))}
+            </select>
+            <select
+              value={selectedInterval}
+              onChange={(e) => onIntervalChange(e.target.value)}
+              className="bg-black border border-brand-border text-xs text-white rounded px-2 py-1.5 focus:outline-none cursor-pointer font-mono"
+            >
+              {Object.keys(TF_SECONDS).map(tf => (
+                <option key={tf} value={tf}>{tf}</option>
+              ))}
+            </select>
+            <select
               value={strategy}
               onChange={(e) => setStrategy(e.target.value)}
               className="bg-black border border-brand-border text-xs text-white rounded px-2 py-1.5 focus:outline-none cursor-pointer font-mono"
@@ -67,6 +128,12 @@ export default function Backtester({ selectedInstrument, selectedInterval }: Bac
               <option value="sma_ema_cross">SMA / EMA Trend Follow</option>
               <option value="rsi_overbought_oversold">RSI Reversal Bounce</option>
               <option value="bollinger_band_reversal">Bollinger Bands Mean Reversal</option>
+              <option value="s2_scalper">S2 Scalper (RSI+MACD+VWAP+BB)</option>
+              <option value="option_rsi_mr">Option RSI Mean Revert</option>
+              <option value="trend_continuation">Trend Continuation (ADX+Stoch)</option>
+              <option value="bb_mean_reversion">BB Mean Reversion (new)</option>
+              <option value="rsi_reversal">RSI Reversal (new)</option>
+              <option value="sma_ema_trend">SMA/EMA Trend (new)</option>
             </select>
 
             <button
@@ -95,29 +162,67 @@ export default function Backtester({ selectedInstrument, selectedInterval }: Bac
               Verify trade success ratios, drawdowns, and returns for{" "}
               <span className="font-bold text-gray-300 not-italic">{selectedInstrument.stock_name}</span> using historical candles from Nubra.
             </p>
+            <p className="text-[10px] text-gray-600 font-mono">
+              {selectedInterval} × {DURATIONS[duration]?.label || duration} = ~{length} candles
+            </p>
 
             {/* Parameter adjusters */}
             <div className="flex gap-4 max-w-sm bg-black p-3 rounded border border-brand-border text-left">
-              <div>
-                <label className="block text-[9px] uppercase font-bold text-gray-500 mb-1 tracking-wider font-mono">Stop-loss SL %</label>
-                <input
-                  type="number"
-                  step="0.1"
-                  value={stopLoss}
-                  onChange={(e) => setStopLoss(parseFloat(e.target.value))}
-                  className="w-full bg-brand-card border border-brand-border rounded px-2 py-1 text-xs text-white font-mono focus:outline-none"
-                />
-              </div>
-              <div>
-                <label className="block text-[9px] uppercase font-bold text-gray-500 mb-1 tracking-wider font-mono">Take-Profit TP %</label>
-                <input
-                  type="number"
-                  step="0.1"
-                  value={target}
-                  onChange={(e) => setTarget(parseFloat(e.target.value))}
-                  className="w-full bg-brand-card border border-brand-border rounded px-2 py-1 text-xs text-white font-mono focus:outline-none"
-                />
-              </div>
+              {strategy === "s2_scalper" ? (
+                <>
+                  <div>
+                    <label className="block text-[9px] uppercase font-bold text-gray-500 mb-1 tracking-wider font-mono">CT (conf%)</label>
+                    <input type="number" step="1" value={ct} onChange={(e) => setCt(parseInt(e.target.value))}
+                      className="w-16 glass-surface-sm border border-brand-border rounded px-2 py-1 text-xs text-white font-mono focus:outline-none" />
+                  </div>
+                  <div>
+                    <label className="block text-[9px] uppercase font-bold text-gray-500 mb-1 tracking-wider font-mono">PT (target%)</label>
+                    <input type="number" step="1" value={pt} onChange={(e) => setPt(parseInt(e.target.value))}
+                      className="w-16 glass-surface-sm border border-brand-border rounded px-2 py-1 text-xs text-white font-mono focus:outline-none" />
+                  </div>
+                  <div>
+                    <label className="block text-[9px] uppercase font-bold text-gray-500 mb-1 tracking-wider font-mono">SL (stop%)</label>
+                    <input type="number" step="1" value={sl} onChange={(e) => setSl(parseInt(e.target.value))}
+                      className="w-16 glass-surface-sm border border-brand-border rounded px-2 py-1 text-xs text-white font-mono focus:outline-none" />
+                  </div>
+                </>
+              ) : strategy === "option_rsi_mr" ? (
+                <>
+                  <div>
+                    <label className="block text-[9px] uppercase font-bold text-gray-500 mb-1 tracking-wider font-mono">RSI Thresh</label>
+                    <input type="number" step="1" value={optRsiThreshold} onChange={(e) => setOptRsiThreshold(parseInt(e.target.value))}
+                      className="w-16 glass-surface-sm border border-brand-border rounded px-2 py-1 text-xs text-white font-mono focus:outline-none" />
+                  </div>
+                  <div>
+                    <label className="block text-[9px] uppercase font-bold text-gray-500 mb-1 tracking-wider font-mono">RSI Period</label>
+                    <input type="number" step="1" value={optRsiPeriod} onChange={(e) => setOptRsiPeriod(parseInt(e.target.value))}
+                      className="w-16 glass-surface-sm border border-brand-border rounded px-2 py-1 text-xs text-white font-mono focus:outline-none" />
+                  </div>
+                  <div>
+                    <label className="block text-[9px] uppercase font-bold text-gray-500 mb-1 tracking-wider font-mono">TP Pts</label>
+                    <input type="number" step="1" value={optTargetPts} onChange={(e) => setOptTargetPts(parseInt(e.target.value))}
+                      className="w-16 glass-surface-sm border border-brand-border rounded px-2 py-1 text-xs text-white font-mono focus:outline-none" />
+                  </div>
+                  <div>
+                    <label className="block text-[9px] uppercase font-bold text-gray-500 mb-1 tracking-wider font-mono">Max Prem</label>
+                    <input type="number" step="1" value={optMaxPremium} onChange={(e) => setOptMaxPremium(parseInt(e.target.value))}
+                      className="w-16 glass-surface-sm border border-brand-border rounded px-2 py-1 text-xs text-white font-mono focus:outline-none" />
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div>
+                    <label className="block text-[9px] uppercase font-bold text-gray-500 mb-1 tracking-wider font-mono">Stop-loss SL %</label>
+                    <input type="number" step="0.1" value={stopLoss} onChange={(e) => setStopLoss(parseFloat(e.target.value))}
+                      className="w-full glass-surface-sm border border-brand-border rounded px-2 py-1 text-xs text-white font-mono focus:outline-none" />
+                  </div>
+                  <div>
+                    <label className="block text-[9px] uppercase font-bold text-gray-500 mb-1 tracking-wider font-mono">Take-Profit TP %</label>
+                    <input type="number" step="0.1" value={target} onChange={(e) => setTarget(parseFloat(e.target.value))}
+                      className="w-full glass-surface-sm border border-brand-border rounded px-2 py-1 text-xs text-white font-mono focus:outline-none" />
+                  </div>
+                </>
+              )}
             </div>
 
             <button
@@ -132,7 +237,7 @@ export default function Backtester({ selectedInstrument, selectedInterval }: Bac
             <Play className="h-8 w-8 text-white animate-ping" />
             <p className="font-semibold text-white uppercase tracking-wider">Running quantitative verification...</p>
             <span className="text-[10px] text-gray-500 max-w-xs text-center font-serif italic">
-              Processing {selectedInterval} interval candles, triggering SMA moving envelopes, and generating statistical return quotients.
+              Processing {length} {selectedInterval} candles, triggering signals, and computing statistics.
             </span>
           </div>
         ) : error ? (
@@ -173,6 +278,40 @@ export default function Backtester({ selectedInstrument, selectedInterval }: Bac
               </div>
             </div>
 
+            {/* Risk Metrics — only present for premium-model strategies; null
+                fields mean the sample size (<15 trades) is too small to trust. */}
+            {results!.summary.maxDrawdownPct !== undefined && (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div className="bg-black p-3 rounded border border-brand-border">
+                  <span className="block text-[9px] uppercase font-bold text-gray-500 tracking-wider font-mono">Sharpe Ratio</span>
+                  <span className="block font-mono text-sm sm:text-base font-bold text-white mt-1">
+                    {results!.summary.sharpe != null ? results!.summary.sharpe.toFixed(2) : "— (n<15)"}
+                  </span>
+                </div>
+
+                <div className="bg-black p-3 rounded border border-brand-border">
+                  <span className="block text-[9px] uppercase font-bold text-gray-500 tracking-wider font-mono">Max Drawdown</span>
+                  <span className="block font-mono text-sm sm:text-base font-bold text-brand-red mt-1">
+                    {results!.summary.maxDrawdownPct}%
+                  </span>
+                </div>
+
+                <div className="bg-black p-3 rounded border border-brand-border">
+                  <span className="block text-[9px] uppercase font-bold text-gray-500 tracking-wider font-mono">Drawdown Duration</span>
+                  <span className="block font-mono text-sm sm:text-base font-bold text-gray-400 mt-1">
+                    {results!.summary.maxDrawdownDurationDays != null ? `${results!.summary.maxDrawdownDurationDays}d` : "—"}
+                  </span>
+                </div>
+
+                <div className="bg-black p-3 rounded border border-brand-border">
+                  <span className="block text-[9px] uppercase font-bold text-gray-500 tracking-wider font-mono">Calmar Ratio</span>
+                  <span className="block font-mono text-sm sm:text-base font-bold text-white mt-1">
+                    {results!.summary.calmar != null ? results!.summary.calmar.toFixed(2) : "—"}
+                  </span>
+                </div>
+              </div>
+            )}
+
             {/* Trades Ledger Table */}
             <div className="border border-brand-border rounded overflow-hidden">
               <table className="w-full text-left border-collapse text-[10px]">
@@ -186,6 +325,7 @@ export default function Backtester({ selectedInstrument, selectedInterval }: Bac
                     <th className="p-2.5">Exit Price</th>
                     <th className="p-2.5">Qty</th>
                     <th className="p-2.5 text-right">Outcome</th>
+                    <th className="p-2.5 hidden lg:table-cell">Exit Reason</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-brand-border/40">
@@ -213,6 +353,7 @@ export default function Backtester({ selectedInstrument, selectedInterval }: Bac
                         <td className={`p-2.5 text-right font-bold font-mono ${tr.result === "WIN" ? "text-brand-green" : "text-brand-red"}`}>
                           {tr.pnl >= 0 ? "+" : ""}₹{tr.pnl.toLocaleString("en-IN")} ({tr.pnlPercent}%)
                         </td>
+                        <td className="p-2.5 font-mono hidden lg:table-cell">{tr.exitReason || "-"}</td>
                       </tr>
                     );
                   })}

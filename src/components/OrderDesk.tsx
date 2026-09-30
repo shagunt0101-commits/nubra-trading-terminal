@@ -12,6 +12,11 @@ interface OrderDeskProps {
     stoploss: number;
     target: number;
     qty: number;
+    refId?: number;
+    derivative_type?: string;
+    option_type?: string;
+    strike_price?: number;
+    scrip_name?: string;
   } | null;
 }
 
@@ -43,6 +48,9 @@ export default function OrderDesk({
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
+  // Option-LTP click override — takes precedence over selectedInstrument
+  const [overrideInstrument, setOverrideInstrument] = useState<Instrument | null>(null);
+
   // Pre-fill from AI signals
   useEffect(() => {
     if (prefillParams) {
@@ -51,17 +59,30 @@ export default function OrderDesk({
       if (prefillParams.price !== undefined && prefillParams.price !== null) {
         setEntryPrice(prefillParams.price.toString());
       }
-      
+
       if (prefillParams.stoploss) {
         setUseStoploss(true);
         setStoplossTrigger(prefillParams.stoploss.toString());
         setStoplossLimit((prefillParams.stoploss - 1).toString());
       }
-      
+
       if (prefillParams.target) {
         setUseTarget(true);
         setTargetTrigger(prefillParams.target.toString());
         setTargetLimit((prefillParams.target - 1).toString());
+      }
+
+      // Option-LTP click → override instrument so the desk targets the option,
+      // not the stale INDEX/FUT scrip.
+      if (prefillParams.refId) {
+        const isOption = prefillParams.derivative_type === "OPT";
+        setOverrideInstrument({
+          ref_id: prefillParams.refId,
+          stock_name: prefillParams.scrip_name || (isOption ? `${prefillParams.option_type} ${prefillParams.strike_price}` : ""),
+          derivative_type: prefillParams.derivative_type || "OPT",
+          option_type: prefillParams.option_type || "",
+          asset: "FNO",
+        } as Instrument);
       }
     }
   }, [prefillParams]);
@@ -94,9 +115,11 @@ export default function OrderDesk({
     );
   };
 
+  const targetInstrument = overrideInstrument || selectedInstrument;
+
   const handlePlaceOrder = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (orderType === "SINGLE" && !selectedInstrument) return;
+    if (orderType === "SINGLE" && !targetInstrument) return;
     setIsLoading(true);
     setError("");
     setMessage("");
@@ -113,7 +136,7 @@ export default function OrderDesk({
       };
 
       if (orderType === "SINGLE") {
-        payload.refId = selectedInstrument!.ref_id;
+        payload.refId = targetInstrument!.ref_id;
         if (priceType === "LIMIT") {
           // Convert price to integer paise as expected by OMS V3
           payload.entryPrice = Math.round(parseFloat(entryPrice) * 100);
@@ -125,7 +148,7 @@ export default function OrderDesk({
         if (useStoploss || useTarget) {
           payload.executionMode = "ENTRY_AND_EXIT";
           payload.exitConfig = {};
-          
+
           if (useStoploss && stoplossTrigger) {
             payload.exitConfig.stoplossParams = {
               stoplossTriggerPrice: { value: Math.round(parseFloat(stoplossTrigger) * 100) },
@@ -180,15 +203,15 @@ export default function OrderDesk({
   };
 
   return (
-    <div className="bg-brand-card border border-brand-border rounded-lg p-5 shadow-2xl flex flex-col h-[650px] overflow-hidden">
+    <div className="glass-surface border border-brand-border rounded-xl flex flex-col min-h-0 flex-1 overflow-hidden shadow-2xl glass-enter">
       {/* Tab Switcher */}
-      <div className="flex gap-2 border-b border-brand-border pb-3 mb-4 bg-black/20">
+      <div className="flex gap-2 border-b border-brand-border pb-3 mb-4 glass-base/50">
         <button
           onClick={() => setOrderType("SINGLE")}
           className={`flex-1 py-1.5 text-xs font-bold rounded uppercase tracking-wider transition-colors border ${
             orderType === "SINGLE"
-              ? "bg-white border-transparent text-black"
-              : "border-transparent text-gray-400 hover:text-white cursor-pointer"
+              ? "glass-surface text-white shadow-lg shadow-emerald-500/20 border-transparent"
+              : "glass-surface-sm text-gray-400 hover:text-white hover:bg-white/5 border-transparent cursor-pointer"
           }`}
         >
           Regular Entry
@@ -197,8 +220,8 @@ export default function OrderDesk({
           onClick={() => setOrderType("STRATEGY")}
           className={`flex-1 py-1.5 text-xs font-bold rounded uppercase tracking-wider transition-colors border ${
             orderType === "STRATEGY"
-              ? "bg-white border-transparent text-black"
-              : "border-transparent text-gray-400 hover:text-white cursor-pointer"
+              ? "glass-surface text-white shadow-lg shadow-indigo-500/20 border-transparent"
+              : "glass-surface-sm text-gray-400 hover:text-white hover:bg-white/5 border-transparent cursor-pointer"
           }`}
         >
           Strategy Basket
@@ -223,15 +246,15 @@ export default function OrderDesk({
           {/* SINGLE ORDER CONFIG */}
           {orderType === "SINGLE" ? (
             <>
-              {!selectedInstrument ? (
+              {!targetInstrument ? (
                 <div className="text-center py-10 text-gray-500 text-xs font-serif italic">
                   Please pick an asset from the Screener.
                 </div>
               ) : (
                 <div className="space-y-3">
-                  <div className="flex justify-between items-center bg-black p-3 rounded border border-brand-border">
+                  <div className="flex justify-between items-center glass-base p-3 rounded border border-brand-border">
                     <span className="text-xs text-gray-400 font-serif italic">Active Scrip</span>
-                    <span className="text-xs font-bold text-white">{selectedInstrument.stock_name}</span>
+                    <span className="text-xs font-bold text-white">{targetInstrument.stock_name}</span>
                   </div>
 
                   {/* Side Switch */}
@@ -242,7 +265,7 @@ export default function OrderDesk({
                       className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded text-xs font-bold font-mono uppercase tracking-wider transition-all border cursor-pointer ${
                         side === "BUY"
                           ? "bg-brand-green/15 border-brand-green text-brand-green glow-green"
-                          : "bg-black border-brand-border text-gray-400 hover:text-white"
+                          : "glass-base border-brand-border text-gray-400 hover:text-white hover:bg-white/5"
                       }`}
                     >
                       <ArrowUpRight className="h-4 w-4" /> Buy / Long
@@ -253,7 +276,7 @@ export default function OrderDesk({
                       className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded text-xs font-bold font-mono uppercase tracking-wider transition-all border cursor-pointer ${
                         side === "SELL"
                           ? "bg-brand-red/15 border-brand-red text-brand-red glow-red"
-                          : "bg-black border-brand-border text-gray-400 hover:text-white"
+                          : "glass-base border-brand-border text-gray-400 hover:text-white hover:bg-white/5"
                       }`}
                     >
                       <ArrowDownLeft className="h-4 w-4" /> Sell / Short
@@ -269,7 +292,7 @@ export default function OrderDesk({
                         min="1"
                         value={qty}
                         onChange={(e) => setQty(parseInt(e.target.value, 10))}
-                        className="w-full bg-black border border-brand-border rounded p-2 text-xs text-white focus:outline-none focus:border-white/20 font-mono"
+                        className="w-full glass-base border border-brand-border rounded p-2 text-xs text-white focus:outline-none focus:border-white/20 font-mono"
                       />
                     </div>
                     <div>
@@ -277,7 +300,7 @@ export default function OrderDesk({
                       <select
                         value={deliveryType}
                         onChange={(e: any) => setDeliveryType(e.target.value)}
-                        className="w-full bg-black border border-brand-border rounded p-2 text-xs text-white focus:outline-none focus:border-white/20 cursor-pointer"
+                        className="w-full glass-base border border-brand-border rounded p-2 text-xs text-white focus:outline-none focus:border-white/20 cursor-pointer"
                       >
                         <option value="IDAY">Intraday (IDAY)</option>
                         <option value="CNC">Delivery (CNC)</option>
@@ -291,7 +314,7 @@ export default function OrderDesk({
                       <select
                         value={priceType}
                         onChange={(e: any) => setPriceType(e.target.value)}
-                        className="w-full bg-black border border-brand-border rounded p-2 text-xs text-white focus:outline-none focus:border-white/20 cursor-pointer"
+                        className="w-full glass-base border border-brand-border rounded p-2 text-xs text-white focus:outline-none focus:border-white/20 cursor-pointer"
                       >
                         <option value="LIMIT">Limit</option>
                         <option value="MARKET">Market</option>
@@ -304,7 +327,7 @@ export default function OrderDesk({
                         disabled={priceType === "MARKET"}
                         value={priceType === "MARKET" ? "Market" : entryPrice}
                         onChange={(e) => setEntryPrice(e.target.value)}
-                        className="w-full bg-black border border-brand-border rounded p-2 text-xs text-white focus:outline-none focus:border-white/20 font-mono disabled:opacity-40"
+                        className="w-full glass-base border border-brand-border rounded p-2 text-xs text-white focus:outline-none focus:border-white/20 font-mono disabled:opacity-40"
                       />
                     </div>
                   </div>
@@ -333,7 +356,7 @@ export default function OrderDesk({
                           disabled={!useStoploss}
                           value={stoplossTrigger}
                           onChange={(e) => setStoplossTrigger(e.target.value)}
-                          className="w-full bg-black border border-brand-border rounded p-1.5 text-xs text-white focus:outline-none focus:border-white/20 font-mono disabled:opacity-40"
+                          className="w-full glass-base border border-brand-border rounded p-1.5 text-xs text-white focus:outline-none focus:border-white/20 font-mono disabled:opacity-40"
                         />
                       </div>
 
@@ -354,7 +377,7 @@ export default function OrderDesk({
                           disabled={!useTarget}
                           value={targetTrigger}
                           onChange={(e) => setTargetTrigger(e.target.value)}
-                          className="w-full bg-black border border-brand-border rounded p-1.5 text-xs text-white focus:outline-none focus:border-white/20 font-mono disabled:opacity-40"
+                          className="w-full glass-base border border-brand-border rounded p-1.5 text-xs text-white focus:outline-none focus:border-white/20 font-mono disabled:opacity-40"
                         />
                       </div>
                     </div>
@@ -370,9 +393,9 @@ export default function OrderDesk({
                 <button
                   type="button"
                   onClick={addLeg}
-                  className="flex items-center gap-1 text-[10px] bg-white text-black px-2.5 py-1.5 rounded font-bold transition-all cursor-pointer shadow-sm hover:bg-gray-100"
+                  className="flex items-center gap-1 text-[10px] glass-surface text-white px-2.5 py-1.5 rounded font-bold transition-all cursor-pointer shadow-sm hover:bg-indigo-500"
                 >
-                  <Plus className="h-3 w-3 text-black" /> Add Option Leg
+                  <Plus className="h-3 w-3" /> Add Option Leg
                 </button>
               </div>
 
@@ -383,12 +406,12 @@ export default function OrderDesk({
                   </div>
                 ) : (
                   legs.map((leg, idx) => (
-                    <div key={idx} className="flex gap-2 items-center bg-black p-2.5 rounded border border-brand-border">
+                    <div key={idx} className="flex gap-2 items-center glass-base p-2.5 rounded border border-brand-border">
                       {/* Instrument dropdown */}
                       <select
                         value={leg.refId}
                         onChange={(e) => updateLeg(idx, "refId", parseInt(e.target.value, 10))}
-                        className="flex-1 bg-brand-card border border-brand-border text-[10px] text-white rounded px-2 py-1.5 focus:outline-none cursor-pointer"
+                        className="flex-1 glass-surface-sm border border-brand-border text-[10px] text-white rounded px-2 py-1.5 focus:outline-none cursor-pointer"
                       >
                         {instruments.map((inst) => (
                           <option key={inst.ref_id} value={inst.ref_id}>
@@ -403,7 +426,7 @@ export default function OrderDesk({
                         placeholder="Weight"
                         value={leg.unitQty}
                         onChange={(e) => updateLeg(idx, "unitQty", parseInt(e.target.value, 10))}
-                        className="w-16 bg-brand-card border border-brand-border text-[10px] text-white rounded p-1.5 focus:outline-none font-mono text-center"
+                        className="w-16 glass-surface-sm border border-brand-border text-[10px] text-white rounded p-1.5 focus:outline-none font-mono text-center"
                       />
 
                       <button
@@ -426,7 +449,7 @@ export default function OrderDesk({
                     type="number"
                     value={qty}
                     onChange={(e) => setQty(parseInt(e.target.value, 10))}
-                    className="w-full bg-black border border-brand-border rounded p-2 text-xs text-white focus:outline-none font-mono"
+                    className="w-full glass-base border border-brand-border rounded p-2 text-xs text-white focus:outline-none font-mono"
                   />
                 </div>
                 <div>
@@ -435,7 +458,7 @@ export default function OrderDesk({
                     type="text"
                     value={entryPrice}
                     onChange={(e) => setEntryPrice(e.target.value)}
-                    className="w-full bg-black border border-brand-border rounded p-2 text-xs text-white focus:outline-none font-mono"
+                    className="w-full glass-base border border-brand-border rounded p-2 text-xs text-white focus:outline-none font-mono"
                   />
                 </div>
               </div>
@@ -448,9 +471,9 @@ export default function OrderDesk({
           <button
             type="submit"
             disabled={isLoading || (orderType === "SINGLE" && !selectedInstrument)}
-            className="w-full py-3 bg-white hover:bg-gray-100 text-black rounded text-xs font-bold font-mono tracking-wider uppercase transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-40 disabled:pointer-events-none"
+            className="w-full py-3 glass-surface text-white rounded text-xs font-bold font-mono tracking-wider uppercase transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-40 disabled:pointer-events-none shadow-lg shadow-indigo-500/20 hover:shadow-indigo-500/30"
           >
-            <Landmark className="h-4 w-4 text-black" />
+            <Landmark className="h-4 w-4" />
             {isLoading ? "Executing..." : "Transmit Order to Exchange"}
           </button>
         </div>

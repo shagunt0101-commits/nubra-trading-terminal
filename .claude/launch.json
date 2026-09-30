@@ -1,0 +1,20 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "Dev server",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["tsx", "server.ts"],
+      "port": 3000,
+      "autoPort": false
+    },
+    {
+      "name": "Attach",
+      "url": "http://localhost:3000",
+      "port": 3000,
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["tsx", "server.ts"],
+      "autoPort": false
+    }
+  ]
+}

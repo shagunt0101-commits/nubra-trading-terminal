@@ -1,0 +1,17 @@
+SWEEP: 45 days, 5 instruments (NIFTY BANKNIFTY FINNIFTY MIDCPNIFTY SENSEX) x 7 TFs (1m 3m 5m 15m 1h 4h 1d) x 9 strategies.
+180 runs, 15 fetch errors (1h/4h/1d have <200 candles from broker — skipped).
+Tick-by-tick engine: intra-bar SL/TP via high/low, signal at bar i -> entry at open i+1 (no lookahead),
+spot strategies on real index prices; premium strategies on modeled premium (entry + 0.5*model move, theta 1%/day).
+
+SPOT STRATEGIES (trustworthy - real prices):
+bollinger_band_reversal  n=81  sumPnl +0.2%  WR 39.5% PF 6.26  best MIDCPNIFTY 15m +7.0% WR60%
+rsi_overbought_oversold  n=71  sumPnl +18.6% WR 46.5% PF 16.01 best MIDCPNIFTY 5m +9.9% WR100%
+sma_ema_cross            n=60  sumPnl +3.5%  WR 43.3% PF 6.28  best MIDCPNIFTY 5m +4.1% WR67%
+s2_scalper               n=40  sumPnl -32.4% WR 20.0% PF 0.40  best FINNIFTY 5m +1.5% WR50%
+
+PREMIUM STRATEGIES (model artifacts - absolute PnL unreliable, relative signal density only):
+option_rsi_mr       n=745  mostTrades TF 1m (450)
+trend_continuation  n=2103 mostTrades TF 1m (1321)
+bb_mean_reversion   n=887  mostTrades TF 1m (561)
+rsi_reversal        n=663  mostTrades TF 1m (400)
+sma_ema_trend       n=1244 mostTrades TF 1m (780)

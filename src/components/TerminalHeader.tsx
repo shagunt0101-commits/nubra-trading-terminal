@@ -1,16 +1,9 @@
 import React, { useState, useEffect } from "react";
-import { ShieldCheck, ShieldAlert, RefreshCw, Landmark, AlertTriangle, Key, Clock, Smartphone, Send, XCircle } from "lucide-react";
-import { PortfolioSummary } from "../types";
+import { ShieldCheck, ShieldAlert, RefreshCw, Landmark, AlertTriangle, Key, Clock, Smartphone, Send, XCircle, TrendingUp, TrendingDown, Minus } from "lucide-react";
+import { PortfolioSummary, LoginState } from "../types";
 
 interface TerminalHeaderProps {
-  loginState: {
-    status: string;
-    error: string;
-    phone: string;
-    deviceId: string;
-    env: string;
-    baseUrl: string;
-  };
+  loginState: LoginState;
   portfolio: PortfolioSummary | null;
   onRefreshLogin: () => void;
   isRefreshingLogin: boolean;
@@ -27,12 +20,10 @@ export default function TerminalHeader({
   const funds = portfolio?.funds?.portFundsAndMargin;
   const positions = portfolio?.positions?.portfolio;
 
-  const totalFunds = funds ? funds.startOfDayFunds / 100 : 500000;
-  const netMargin = funds ? funds.netMarginAvailable / 100 : 485000;
-  const blockedMargin = funds ? funds.totalMarginBlocked / 100 : 15000;
-  const dayPnl = positions ? positions.positionStats.totalPnl / 100 : 3500;
-
-  const [currentTime, setCurrentTime] = useState<Date>(new Date());
+  const totalFunds = funds ? funds.startOfDayFunds / 100 : null;
+  const netMargin = funds ? funds.netMarginAvailable / 100 : null;
+  const blockedMargin = funds ? funds.totalMarginBlocked / 100 : null;
+  const dayPnl = positions ? positions.positionStats.totalPnl / 100 : null;
 
   // OTP login state
   const [showOtpModal, setShowOtpModal] = useState(false);
@@ -86,26 +77,9 @@ export default function TerminalHeader({
     }
   };
 
-  useEffect(() => {
-    const timer = setInterval(() => setCurrentTime(new Date()), 1000);
-    return () => clearInterval(timer);
-  }, []);
-
-  // Determine market status (NSE: Mon-Fri 09:15 - 15:30 IST)
-  const istTimeStr = currentTime.toLocaleString("en-US", { timeZone: "Asia/Kolkata" });
-  const istDate = new Date(istTimeStr);
-  const day = istDate.getDay(); // 0 = Sun, 6 = Sat
-  const hours = istDate.getHours();
-  const minutes = istDate.getMinutes();
-  const timeNum = hours * 100 + minutes;
-
-  const isWeekday = day >= 1 && day <= 5;
-  const isMarketHours = timeNum >= 915 && timeNum <= 1530;
-  const isMarketOpen = isWeekday && isMarketHours;
-
   return (
-    <header className="bg-brand-card border-b border-brand-border text-slate-100 py-3 px-4 md:px-6 z-20 shadow-md">
-      <div className="w-full mx-auto flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3 px-4">
+    <header className="glass-surface border-b border-white/6 text-slate-100 py-2 lg:py-3 px-2 md:px-6 z-20 shadow-md">
+      <div className="w-full mx-auto flex flex-col md:flex-row items-stretch md:items-center justify-between gap-2 md:gap-3 px-2 lg:px-4">
         {/* Logo and Broker Status */}
         <div className="flex items-center gap-4">
           <div className="w-8 h-8 bg-white flex items-center justify-center rounded-sm shrink-0">
@@ -139,56 +113,44 @@ export default function TerminalHeader({
                 )}
               </div>
             </div>
-            {/* Clock & Market Status Widget */}
-            <div className="flex items-center gap-2 mt-1.5 text-[11px] font-mono text-gray-400">
-              <div className="flex items-center gap-1">
-                <Clock className="h-3 w-3 text-gray-400" />
-                <span className="text-gray-300">
-                  {currentTime.toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })} IST
-                </span>
-              </div>
-              <span className="text-white/20">•</span>
-              <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider ${
-                isMarketOpen 
-                  ? "bg-emerald-500/10 text-brand-green border border-emerald-500/20" 
-                  : "bg-amber-500/10 text-amber-400 border border-amber-500/20"
-              }`}>
-                <span className={`w-1.5 h-1.5 rounded-full ${isMarketOpen ? "bg-brand-green animate-pulse" : "bg-amber-400"}`}></span>
-                {isMarketOpen ? "Market Open" : "Market Closed"}
-              </span>
-            </div>
+            <ClockWidget />
           </div>
         </div>
 
         {/* Account Quick Metrics */}
-        <div className="flex flex-wrap items-center gap-2 md:gap-4 bg-black/40 p-2 md:p-2.5 rounded border border-brand-border">
+        <div className="flex flex-wrap items-center gap-2 md:gap-4 glass-base p-2 md:p-2.5 rounded border border-brand-border">
           <div className="px-3 border-r border-brand-border">
             <span className="block text-[9px] uppercase font-semibold text-gray-500 tracking-wider">Available Capital</span>
             <span className="font-mono text-sm md:text-base font-medium text-white">
-              ₹{netMargin.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              {netMargin !== null ? `₹${netMargin.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : "N/A"}
             </span>
           </div>
 
           <div className="px-3 border-r border-brand-border">
             <span className="block text-[9px] uppercase font-semibold text-gray-500 tracking-wider">Blocked Margin</span>
             <span className="font-mono text-sm md:text-base font-medium text-gray-400">
-              ₹{blockedMargin.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              {blockedMargin !== null ? `₹${blockedMargin.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : "N/A"}
             </span>
           </div>
 
           <div className="px-3 border-r border-brand-border">
             <span className="block text-[9px] uppercase font-semibold text-gray-500 tracking-wider">Day Realized P&L</span>
-            <span className={`font-mono text-sm md:text-base font-bold ${dayPnl >= 0 ? "text-brand-green glow-green" : "text-brand-red glow-red"}`}>
-              {dayPnl >= 0 ? "+" : ""}₹{dayPnl.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            <span className={`font-mono text-sm md:text-base font-bold ${dayPnl !== null ? dayPnl >= 0 ? "text-brand-green glow-green" : "text-brand-red glow-red" : "text-gray-500"}`}>
+              {dayPnl !== null ? `${dayPnl >= 0 ? "+" : ""}₹${dayPnl.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : "N/A"}
             </span>
           </div>
 
           <div className="px-3">
             <span className="block text-[9px] uppercase font-semibold text-gray-500 tracking-wider">Brokerage</span>
             <span className="font-mono text-xs text-gray-400">
-              ₹{funds ? (funds.brokerage / 100).toFixed(2) : "120.00"}
+              {funds ? `₹${(funds.brokerage / 100).toFixed(2)}` : "N/A"}
             </span>
           </div>
+          {!portfolio && (
+            <div className="px-3 border-l border-brand-border pl-3">
+              <span className="text-[10px] text-amber-400/60 font-mono whitespace-nowrap">No broker data</span>
+            </div>
+          )}
         </div>
 
         {/* Credentials Status Control */}
@@ -221,10 +183,10 @@ export default function TerminalHeader({
 
           {/* Diagnostic Info tooltip / trigger */}
           <div className="group relative">
-            <div className="cursor-pointer p-1.5 bg-black/45 border border-brand-border rounded hover:bg-white/5 text-gray-400">
+            <div className="cursor-pointer p-1.5 glass-base border border-brand-border rounded glass-hover text-gray-400">
               <Key className="h-3.5 w-3.5" />
             </div>
-            <div className="absolute right-0 top-10 mt-1 w-72 bg-brand-card border border-brand-border p-4 rounded shadow-2xl invisible group-hover:visible transition-all duration-200 z-50">
+            <div className="absolute right-0 top-10 mt-1 w-72 glass-surface border border-white/10 p-4 rounded shadow-2xl invisible group-hover:visible transition-all duration-200 z-50">
               <div className="flex items-center gap-2 border-b border-brand-border pb-2 mb-2">
                 <Landmark className="h-4 w-4 text-white/80" />
                 <h4 className="font-serif italic text-xs text-white tracking-wider">Nubra Credentials</h4>
@@ -282,7 +244,7 @@ export default function TerminalHeader({
       {/* OTP Login Modal */}
       {showOtpModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
-          <div className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl w-full max-w-md p-6 mx-4">
+          <div className="glass-surface border border-white/10 rounded-2xl shadow-2xl w-full max-w-md p-6 mx-4">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-white font-bold text-sm flex items-center gap-2">
                 <Smartphone className="h-4 w-4 text-emerald-400" />
@@ -301,7 +263,7 @@ export default function TerminalHeader({
                     type="text"
                     value={otpPhone}
                     onChange={(e) => setOtpPhone(e.target.value)}
-                    className="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-white font-mono text-sm focus:outline-none focus:border-emerald-500"
+                    className="w-full glass-base border border-white/10 rounded-lg px-3 py-2 text-white font-mono text-sm focus:outline-none focus:border-emerald-500"
                     placeholder="10-digit phone"
                   />
                 </div>
@@ -325,7 +287,7 @@ export default function TerminalHeader({
                     maxLength={6}
                     value={otpCode}
                     onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, ""))}
-                    className="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-white font-mono text-lg text-center tracking-[0.5em] focus:outline-none focus:border-emerald-500"
+                    className="w-full glass-base border border-white/10 rounded-lg px-3 py-2 text-white font-mono text-lg text-center tracking-[0.5em] focus:outline-none focus:border-emerald-500"
                     placeholder="000000"
                   />
                 </div>
@@ -351,4 +313,47 @@ export default function TerminalHeader({
       )}
     </header>
   );
+}
+
+// Clock + market status — isolated to avoid re-rendering whole header every second
+function ClockWidget() {
+  const [time, setTime] = useState<Date>(new Date());
+  useEffect(() => {
+    const timer = setInterval(() => setTime(new Date()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  const istStr = time.toLocaleString("en-US", { timeZone: "Asia/Kolkata" });
+  const d = new Date(istStr);
+  const day = d.getDay(), hours = d.getHours(), minutes = d.getMinutes();
+  const t = hours * 100 + minutes;
+  const isMarketOpen = day >= 1 && day <= 5 && t >= 915 && t <= 1530;
+  return (
+    <div className="flex items-center gap-2 mt-1.5 text-[11px] font-mono text-gray-400">
+      <div className="flex items-center gap-1">
+        <Clock className="h-3 w-3 text-gray-400" />
+        <span className="text-gray-300">
+          {time.toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })} IST
+        </span>
+      </div>
+      <span className="text-white/20">�</span>
+      <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider ${
+        isMarketOpen ? "bg-emerald-500/10 text-brand-green border border-emerald-500/20" : "bg-amber-500/10 text-amber-400 border border-amber-500/20"
+      }`}>
+        <span className={`w-1.5 h-1.5 rounded-full ${isMarketOpen ? "bg-brand-green animate-pulse" : "bg-amber-400"}`}></span>
+        {isMarketOpen ? "Market Open" : "Market Closed"}
+      </span>
+    </div>
+  );
+}
+
+interface SpotData {
+  symbol: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  prevClose: number;
+  change: number;
+  pChange: number;
+  ltp: number;
 }

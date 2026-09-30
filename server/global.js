@@ -36,8 +36,8 @@ async function fetchQuote(ticker) {
   const quotes = result.indicators?.quote?.[0] || {};
   const closes = quotes.close || [];
 
-  const price = meta.regularMarketPrice ?? meta.previousClose ?? null;
-  const prevClose = meta.previousClose ?? price ?? 0;
+  const price = meta.regularMarketPrice ?? null;
+  const prevClose = meta.previousClose ?? null;
   const dayHigh = meta.regularMarketDayHigh ?? (closes.length > 0 ? Math.max(...closes.filter(c => c !== null)) : null);
   const dayLow = meta.regularMarketDayLow ?? (closes.length > 0 ? Math.min(...closes.filter(c => c !== null)) : null);
 

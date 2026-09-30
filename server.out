@@ -1,0 +1,10 @@
+
+> react-example@0.0.0 dev
+> tsx server.ts
+
+{"level":30,"time":1786350986417,"pid":4228,"hostname":"NAVNEET","path":"C:\\Users\\navne\\Downloads\\mvf-scalping-algo-terminal (3)\\.claude\\worktrees\\adoring-mestorf-de886b\\leadlag_edges.json","edges":6,"msg":"[Scalper] Lead-lag edges loaded"}
+{"level":30,"time":1786350986438,"pid":4228,"hostname":"NAVNEET","type":"STATE","msg":"Config updated: {\"symbol\":\"NIFTY\",\"exchange\":\"NSE\",\"strikeOffset\":1}","msg":"[SCALPER] STATE: Config updated: {\"symbol\":\"NIFTY\",\"exchange\":\"NSE\",\"strikeOffset\":1}"}
+{"level":30,"time":1786350986440,"pid":4228,"hostname":"NAVNEET","path":"C:\\Users\\navne\\Downloads\\mvf-scalping-algo-terminal (3)\\.claude\\worktrees\\adoring-mestorf-de886b\\orderflow_model.json","msg":"[orderflow] Model loaded"}
+{"level":20,"time":1786350986491,"pid":4228,"hostname":"NAVNEET","vars":["NUBRA_ENV","NUBRA_DEVICE_ID"],"msg":"Optional env vars present"}
+[31mWebSocket server error: Port 24678 is already in use[39m
+{"level":50,"time":1786350987844,"pid":4228,"hostname":"NAVNEET","err":{"type":"Error","message":"listen EADDRINUSE: address already in use 0.0.0.0:3000","stack":"Error: listen EADDRINUSE: address already in use 0.0.0.0:3000\n    at Server.setupListenHandle [as _listen2] (node:net:2008:16)\n    at listenInCluster (node:net:2065:12)\n    at node:net:2274:7\n    at process.processTicksAndRejections (node:internal/process/task_queues:90:21)","code":"EADDRINUSE","errno":-4091,"syscall":"listen","address":"0.0.0.0","port":3000},"msg":"[Process] uncaughtException — exiting (supervisor should restart)"}

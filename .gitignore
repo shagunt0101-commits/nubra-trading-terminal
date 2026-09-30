@@ -5,5 +5,17 @@ coverage/
 .DS_Store
 *.log
 .nubra_session
+.nubra_otp_temp
 .env*
 !.env.example
+.scalper-state.json
+*.swp
+server/scalper-state.json
+sweep-results.*
+optimize-results.json
+# broker auth / orderflow scratch — never commit
+login_otp.js
+nubra_login.py
+leadlag_edges.json
+orderflow_model.json
+orderflow-*.jsonl

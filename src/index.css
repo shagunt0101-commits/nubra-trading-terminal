@@ -1,34 +1,101 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=JetBrains+Mono:wght@400;500&family=Playfair+Display:ital,wght@1,500;1,700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Playfair+Display:ital,wght@1,500;1,700&display=swap');
 @import "tailwindcss";
 
 @theme {
   --font-serif: "Playfair Display", serif;
   --font-sans: "Inter", sans-serif;
   --font-mono: "JetBrains Mono", monospace;
-  
-  --color-brand-bg: #050505;
-  --color-brand-card: #111111;
-  --color-brand-border: rgba(255, 255, 255, 0.08);
-  --color-brand-green: #00ff9d;
-  --color-brand-red: #ff4b4b;
+
+  --color-brand-bg: #0a0a14;
+  --color-brand-card: rgba(15, 15, 30, 0.65);
+  --color-brand-border: rgba(255, 255, 255, 0.06);
+  --color-brand-green: #34d399;
+  --color-brand-red: #fb7185;
 }
 
-/* Custom glows */
+/* === Matte Glass Utility Classes === */
+.glass-surface {
+  background: rgba(15, 15, 30, 0.65);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.glass-surface-sm {
+  background: rgba(20, 20, 40, 0.5);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.glass-base {
+  background: rgba(10, 10, 20, 0.85);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* glass-base/* opacity variants — Tailwind v4 (as of @tailwindcss/vite 4.1) no
+   longer applies an /NN opacity modifier to a plain non-utility class, so
+   `glass-base/50` in JSX silently resolved to full-opacity .glass-base. Provide
+   the exact translucency the class string advertises. */
+.glass-base\/80 { background: rgba(10, 10, 20, 0.80); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border: 1px solid rgba(255, 255, 255, 0.06); }
+.glass-base\/60 { background: rgba(10, 10, 20, 0.60); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border: 1px solid rgba(255, 255, 255, 0.06); }
+.glass-base\/50 { background: rgba(10, 10, 20, 0.50); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border: 1px solid rgba(255, 255, 255, 0.06); }
+.glass-base\/40 { background: rgba(10, 10, 20, 0.40); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border: 1px solid rgba(255, 255, 255, 0.06); }
+.glass-base\/30 { background: rgba(10, 10, 20, 0.30); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border: 1px solid rgba(255, 255, 255, 0.06); }
+
+.glass-elevated {
+  background: rgba(20, 20, 40, 0.65);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+}
+
+.glass-hover {
+  transition: background 0.2s ease, border-color 0.2s ease;
+}
+.glass-hover:hover {
+  background: rgba(25, 25, 50, 0.75);
+  border-color: rgba(255, 255, 255, 0.10);
+}
+
+.glass-active {
+  background: rgba(30, 30, 55, 0.7);
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+/* Gradient accent highlight */
+.glass-accent-border {
+  border-image: linear-gradient(135deg, #0ea5e9, #14b8a6) 1;
+}
+
+/* Glass entrance */
+@keyframes glass-fade-in {
+  from { opacity: 0; backdrop-filter: blur(0px); }
+  to { opacity: 1; backdrop-filter: blur(16px); }
+}
+.glass-enter {
+  animation: glass-fade-in 0.3s ease-out;
+}
+
+/* Custom glows (softened for new palette) */
 .glow-green {
-  text-shadow: 0 0 12px rgba(0, 255, 157, 0.4);
+  text-shadow: 0 0 12px rgba(52, 211, 153, 0.35);
 }
 
 .glow-red {
-  text-shadow: 0 0 12px rgba(255, 75, 75, 0.4);
+  text-shadow: 0 0 12px rgba(251, 113, 133, 0.35);
 }
 
-/* Custom scrollbar matching Sophisticated Dark styling */
+/* Custom scrollbar */
 ::-webkit-scrollbar {
-  width: 5px;
-  height: 5px;
+  width: 6px;
+  height: 6px;
 }
 ::-webkit-scrollbar-track {
-  background: #050505;
+  background: #0a0a14;
 }
 ::-webkit-scrollbar-thumb {
   background: rgba(255, 255, 255, 0.12);

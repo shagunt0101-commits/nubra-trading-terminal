@@ -1,3 +1,4 @@
+import logger from "./logger.js";
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
 let aiClient: any = null;
@@ -5,7 +6,7 @@ let aiClient: any = null;
 async function getAiClient(): Promise<any> {
   if (!aiClient) {
     if (!GEMINI_API_KEY) {
-      console.warn("GEMINI_API_KEY is not defined in environment variables. AI features may fail.");
+      logger.warn("GEMINI_API_KEY not set, AI features may fail");
     }
     const { GoogleGenAI } = await import("@google/genai");
     aiClient = new GoogleGenAI({
@@ -99,11 +100,34 @@ Market Context:
 Analyze this data and return the professional screening & signaling report with dedicated ATM CE and PE breakdown for ${marketContext.symbol}.
   `;
 
-  // Custom AI Provider Flow
+  // Custom AI Provider Flow — wrapped so an unreachable/dead custom endpoint
+  // (e.g. a stale tunnel) degrades to the Gemini fallback below instead of a
+  // hard 500. Config errors that the operator should fix (no key at all, bad
+  // URL scheme) still throw.
   if (marketContext.aiProvider === "custom") {
-    const customKey = marketContext.customApiKey || process.env.CUSTOM_AI_API_KEY || "";
-    let customUrl = marketContext.customBaseUrl || process.env.CUSTOM_AI_BASE_URL || "https://api.openai.com/v1";
-    const customModel = marketContext.customModel || process.env.CUSTOM_AI_MODEL || "gpt-4o-mini";
+    // Security: a key from the client may only be used against a URL the client
+    // also supplied (it is the client's own key). The env key (operator secret)
+    // must NEVER be forwarded to a client-supplied URL — that is a key-exfiltration
+    // channel. Resolve URL strictly from env whenever the env key is in play.
+    const clientKey: string | undefined = marketContext.customApiKey;
+    const envKey = process.env.CUSTOM_AI_API_KEY;
+    const keySource = clientKey ? "client" : (envKey ? "env" : "none");
+    if (keySource === "none") {
+      throw new Error("CUSTOM_AI_API_KEY not set and no client key provided");
+    }
+    const customKey = keySource === "client" ? clientKey! : envKey!;
+    const customUrl = keySource === "client"
+      ? (marketContext.customBaseUrl || process.env.CUSTOM_AI_BASE_URL)
+      : process.env.CUSTOM_AI_BASE_URL;
+    if (!customUrl) {
+      throw new Error(`CUSTOM_AI_BASE_URL is required when using the ${keySource} key`);
+    }
+    let parsedUrl: URL;
+    try { parsedUrl = new URL(customUrl); } catch (e) { throw new Error(`Invalid CUSTOM_AI_BASE_URL: ${customUrl}`); }
+    if (parsedUrl.protocol !== "https:") {
+      throw new Error("CUSTOM_AI_BASE_URL must use https");
+    }
+    const customModel = marketContext.customModel || process.env.CUSTOM_AI_MODEL || "ag1";
 
     // Normalize Base URL to chat/completions endpoint
     let url = customUrl;
@@ -167,13 +191,24 @@ Analyze this data and return the professional screening & signaling report with 
       }
       return text;
     } catch (err: any) {
-      console.error("Custom AI provider analysis failed:", err.message);
-      return `### Custom AI Provider Error\nFailed to fetch analysis from Custom AI Endpoint: ${err.message}\n\n*Please verify your API key, Custom Base URL, and model name in the AI settings panel.*`;
+      logger.error({ err }, "Custom AI provider analysis failed — falling back to Gemini");
+      // The custom endpoint failed (dead tunnel, provider outage, bad key):
+      // fall through to the Gemini flow below instead of a hard 500. Only
+      // operator config errors were meant to throw, and those threw already.
+      const backup = marketContext.aiProvider;
+      marketContext.aiProvider = "gemini";
+      const report = await generateTradingSignals(marketContext);
+      marketContext.aiProvider = backup;
+      if (report.startsWith("### AI Analysis Error")) {
+        // Gemini also failed — surface the custom endpoint's original error.
+        throw new Error(`Custom AI Endpoint failed: ${err.message}`);
+      }
+      return report;
     }
   }
 
   // Default Google Gemini Flow
-  const ai = getAiClient();
+  const ai = await getAiClient();
   const modelsToTry = ["gemini-flash-latest", "gemini-3.5-flash", "gemini-3.1-pro-preview"];
 
   let lastErr: any = null;
@@ -192,7 +227,7 @@ Analyze this data and return the professional screening & signaling report with 
         return response.text;
       }
     } catch (err: any) {
-      console.warn(`Model ${model} failed:`, err.message);
+      logger.warn({ err }, `Model ${model} failed`);
       lastErr = err;
     }
   }
@@ -203,8 +238,8 @@ Analyze this data and return the professional screening & signaling report with 
 function generateFallbackAnalysis(marketContext: any): string {
   const symbol = marketContext.symbol || "NIFTY";
   const strategy = marketContext.strategy || "day_trading";
-  const price = marketContext.priceData?.price || 24211;
-  const prevClose = marketContext.priceData?.prev_close || price;
+  const price = marketContext.priceData?.ltp || marketContext.priceData?.price || 24211;
+  const prevClose = marketContext.priceData?.prevClose || marketContext.priceData?.prev_close || price;
   const changePct = ((price - prevClose) / prevClose) * 100;
   const trend = changePct >= 0 ? "BULLISH (Positive Momentum)" : "BEARISH (Negative Pressure)";
 
@@ -237,7 +272,7 @@ function generateFallbackAnalysis(marketContext: any): string {
 
 #### 5. Options Strategy Execution (F&O)
 - **Recommended Setup**: Bull Call Spread / Iron Condor
-- **Strikes**: Buy ATM CE (${Math.round(price / 50) * 50}), Sell OTM CE (${Math.round(price / 50) * 50 + 200}) for optimal risk-defined theta decay.
+- **Strikes**: Buy ATM CE (${marketContext.atmAnalysis?.atmStrike || Math.round(price / 50) * 50}), Sell OTM CE (${(marketContext.atmAnalysis?.atmStrike || Math.round(price / 50) * 50) + 200}) for optimal risk-defined theta decay.
 
 #### 6. Risk Management Filters
 - **Margin Impact**: Within standard intraday margin limits.
